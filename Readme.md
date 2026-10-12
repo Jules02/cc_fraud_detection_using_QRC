@@ -36,6 +36,12 @@ On a laptop, the `small` preset takes a few seconds for `baseline` and about 10�
 > `pip install -e .` installs the `qrc` package in editable mode, so changes you make under
 > `qrc/` take effect immediately without reinstalling.
 
+The optional LSTM baseline also needs PyTorch:
+
+```bash
+pip install -e ".[classical]"
+```
+
 ---
 
 ## Running experiments
@@ -50,9 +56,10 @@ python -m experiments.cli <command> [options]
 |------------|-----------------------------------------------------------------------------------------------|
 | `prepare`  | Data preparation only. Prints the split shapes and fraud counts.                             |
 | `baseline` | Classical control: the logistic readout fitted directly on the raw (flattened) windows.       |
+| `lstm`     | Classical control: an LSTM trained on the windows; validation loss picks the best epoch (needs PyTorch). |
 | `qrc`      | Runs the quantum reservoir on each window, then fits the same logistic readout on its outputs. |
 
-All three commands run the same data preparation:
+All commands run the same data preparation:
 
 ```
 data (simulated or loaded) → feature engineering → DataProcessor → per-customer windows
@@ -68,6 +75,9 @@ Run `python -m experiments.cli <command> --help` to list every option.
 ```bash
 # Classical baseline on a mid-sized simulated dataset
 python -m experiments.cli baseline --size medium
+
+# LSTM baseline on a small-sized simulated dataset
+python -m experiments.cli lstm --size small --epochs 10
 
 # QRC with the exact Qiskit Estimator
 python -m experiments.cli qrc --size medium --backend estimator-exact
@@ -97,12 +107,23 @@ python -m experiments.cli qrc --data load --backend gaussian --precision 0.05
 | `--feature-set 7\|10\|15`     | `7`        | Features selected by the feature analysis. Each set extends the previous one ([list](docs/data_pipeline.md#4-feature-analysis-and-the-feature-sets)) |
 | `--window-length`             | `3`        | Number of transactions per customer window                                   |
 
-**Readout and output**, for `baseline` and `qrc`:
+**Readout and output**, for `baseline` and `qrc` (`--output-dir` also applies to `lstm`):
 
 | Option         | Default        | Meaning                                    |
 |----------------|----------------|--------------------------------------------|
 | `--alpha`      | `1.0`          | Readout regularisation (`C = 1/alpha`)     |
 | `--output-dir` | `results/runs` | Where runs are saved                       |
+
+**LSTM**, for `lstm` only:
+
+| Option            | Default | Meaning                                         |
+|-------------------|---------|-------------------------------------------------|
+| `--hidden-size`   | `32`    | LSTM hidden units                               |
+| `--epochs`        | `50`    | Maximum training epochs                         |
+| `--batch-size`    | `256`   | Training batch size                             |
+| `--learning-rate` | `1e-3`  | Adam learning rate                              |
+| `--patience`      | `8`     | Epochs without validation-loss improvement before stopping |
+| `--seed`          | `42`    | Training seed                                   |
 
 **Reservoir and backend**, for `qrc` only:
 
@@ -126,10 +147,10 @@ The backends:
 
 ### Results
 
-Each `baseline` and `qrc` run creates a directory `results/runs/<timestamp>_<command>/` containing:
+Each `baseline`, `lstm` and `qrc` run creates a directory `results/runs/<timestamp>_<command>/` containing:
 
 - `config.json`: every argument, the data source, the features used and the split sizes
-- `metrics.json`: validation and test metrics, plus the reservoir runtime for `qrc`
+- `metrics.json`: validation and test metrics, plus the reservoir runtime for `qrc` or the training time for `lstm`
 - `scores.npz`: labels and predicted scores per split, for plotting PR/ROC curves later
 
 Each run also appends one row to **`results/runs/summary.csv`**, so you can compare runs side
@@ -236,6 +257,7 @@ cc_fraud_detection_using_QRC/
 │   ├── analysis/            # exploration, feature scoring and selection, plots
 │   ├── benchmarks/          # synthetic tasks: memory, parity, NARMA10
 │   ├── backends/            # statevector, Qiskit Aer Estimator, spin-pulse
+│   ├── baselines/           # classical baseline models (LSTM)
 │   ├── processing.py        # final model input: feature selection, imputation, scaling
 │   ├── sequences.py         # 2D features → (n, window_length, features) per-customer windows
 │   ├── encodings.py         # input encodings (AngleEncoding, ...)

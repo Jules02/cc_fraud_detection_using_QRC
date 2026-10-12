@@ -13,17 +13,18 @@ Data sources (``--data``):
 
 Commands:
     prepare   data preparation only; prints split shapes and fraud counts.
-    baseline  classical control: the same logistic readout, fitted on the raw
-              (flattened) windows instead of the reservoir outputs.
+    baseline  logistic regression fitted on the raw (flattened) feature windows instead of the reservoir outputs.
+    lstm      recurrent neural-network baseline fitted on the feature windows.
     qrc       run the quantum reservoir, then fit the logistic readout.
 
-The readout is fitted on train only. Validation and test metrics are both
-reported; nothing is tuned on validation. Each baseline/qrc run is saved to
+Models are fitted on train only. Validation loss selects the LSTM checkpoint;
+validation and test metrics are reported. Each run is saved to
 ``{output_dir}/{timestamp}_{command}/`` and summarised in ``{output_dir}/summary.csv``.
 
 Examples:
     python -m experiments.cli prepare --size small --save-data data/sim_small
     python -m experiments.cli baseline --size medium
+    python -m experiments.cli lstm --size medium
     python -m experiments.cli qrc --size medium --backend estimator-exact
     python -m experiments.cli qrc --data load --data-dir data --backend gaussian --precision 0.05
 """
@@ -53,6 +54,7 @@ from qrc.protocol import QRCProtocol
 from qrc.readout import ClassicalReadout
 from qrc.reservoirs import RandomCircuitReservoir
 from qrc.sequences import SPLITS, window_by_customer_id
+from experiments.lstm_baseline import run_lstm_baseline
 
 logger = get_logger(__name__)
 
@@ -103,6 +105,8 @@ SUMMARY_FIELDS = (
     # reservoir (qrc only)
     "backend", "backend_precision", "encoding_layers", "encoding_scaling", "n_input_qubits", "n_mem_qubits", "n_qubits", "depth", "entangler",
     "reset_inputs", "observables", "n_observables", "seed", "reservoir_seconds",
+    # lstm only
+    "training_seconds",
     # readout and metrics
     "alpha", "threshold",
     *(f"{split}_{m}" for split in EVAL_SPLITS for m in METRIC_NAMES),
@@ -255,7 +259,7 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
         "n_features": len(FEATURE_SETS[args.feature_set]),
         "window_length": args.window_length,
         **{f"{split}_{k}": data["summary"][split][k] for split in SPLITS for k in ("samples", "frauds")},
-        "alpha": args.alpha,
+        "alpha": getattr(args, "alpha", ""),  # lstm has no logistic readout
         "threshold": metrics["test"]["threshold_used"],
         **{f"{split}_{m}": metrics[split][m] for split in EVAL_SPLITS for m in METRIC_NAMES},
         **extra,
@@ -270,6 +274,8 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
             reset_inputs=args.reset_inputs,
             observables=args.observables, seed=args.seed, **reservoir_info,
         )
+    elif args.command == "lstm":
+        row.update(seed=args.seed)
     return row
 
 
@@ -334,15 +340,33 @@ def build_parser():
     data.add_argument("--window-length", type=int, default=3, help="transactions per customer window")
 
     run = argparse.ArgumentParser(add_help=False)
-    run.add_argument("--alpha", type=float, default=1.0, help="readout regularization (C = 1/alpha)")
     run.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "results" / "runs")
+
+    readout = argparse.ArgumentParser(add_help=False)
+    readout.add_argument("--alpha", type=float, default=1.0, help="readout regularization (C = 1/alpha)")
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare", parents=[common], help="data preparation only")
-    commands.add_parser("baseline", parents=[common, run], help="logistic readout on the raw windows")
+    commands.add_parser(
+        "baseline",
+        parents=[common, run, readout],
+        help="logistic regression on the raw (flattened) feature windows",
+    )
 
-    qrc_parser = commands.add_parser("qrc", parents=[common, run], help="quantum reservoir + logistic readout")
+    lstm_parser = commands.add_parser(
+        "lstm", parents=[common, run], help="LSTM classifier on transaction windows"
+    )
+    lstm_parser.add_argument("--hidden-size", type=int, default=32)
+    lstm_parser.add_argument("--epochs", type=int, default=50)
+    lstm_parser.add_argument("--batch-size", type=int, default=256)
+    lstm_parser.add_argument("--learning-rate", type=float, default=1e-3)
+    lstm_parser.add_argument("--patience", type=int, default=8)
+    lstm_parser.add_argument("--seed", type=int, default=42)
+
+    qrc_parser = commands.add_parser(
+        "qrc", parents=[common, run, readout], help="quantum reservoir + logistic readout"
+    )
     qrc_parser.add_argument("--backend", choices=BACKEND_NAMES, default="estimator-exact")
     qrc_parser.add_argument("--precision", type=float, default=0.05,
                             help="target std. error of each expectation value (gaussian/shots; shots ~ 1/precision**2)")
@@ -373,12 +397,28 @@ def main(argv=None):
     extra, reservoir_info = {}, None
     if args.command == "baseline":
         features = baseline_features(data)
+        metrics, scores = fit_and_evaluate(features, data, args.alpha)
+    elif args.command == "lstm":
+        splits = {
+            split: (data[f"X_{split}"], data[f"y_{split}"])
+            for split in SPLITS
+        }
+        result = run_lstm_baseline(
+            splits,
+            seed=args.seed,
+            hidden_size=args.hidden_size,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            patience=args.patience,
+        )
+        metrics, scores = result["metrics"], result["scores"]
+        extra["training_seconds"] = result["seconds"]
     else:
         start = time.perf_counter()
         features, reservoir_info = qrc_features(data, args)
         extra["reservoir_seconds"] = time.perf_counter() - start
-
-    metrics, scores = fit_and_evaluate(features, data, args.alpha)
+        metrics, scores = fit_and_evaluate(features, data, args.alpha)
     run_dir = save_run(args, data, metrics, scores, extra, reservoir_info)
     print_metrics(metrics)
     print(f"\nResults saved to {run_dir}")
