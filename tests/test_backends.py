@@ -6,7 +6,7 @@ from qiskit_aer.noise import NoiseModel, depolarizing_error
 
 from qrc.backends.estimator import EstimatorBackend
 from qrc.backends.statevector import StatevectorBackend
-from qrc.encodings import AngleEncoding
+from qrc.encodings import AngleEncoding, DenseAngleEncoding
 from qrc.observables import build_observables
 from qrc.reservoirs import RandomCircuitReservoir
 
@@ -108,3 +108,56 @@ def test_invalid_arguments():
         EstimatorBackend(precision=0.0, sampling="shots")
     with pytest.raises(ValueError):
         EstimatorBackend(batch_size=0)
+
+def test_statevector_backend_supports_dense_encoding():
+    n_input_qubits = 3
+    n_features = 4
+
+    encoder = DenseAngleEncoding(n_input_qubits)
+    reservoir = RandomCircuitReservoir(
+        n_input_qubits,
+        N_MEM,
+        rng=np.random.default_rng(0),
+    )
+    observables = build_observables("Z+XX", n_input_qubits + N_MEM)
+    windows = np.random.default_rng(2).uniform(
+        0,
+        1,
+        (2, WINDOW_LENGTH, n_features),
+    )
+
+    result = StatevectorBackend().run_batch(
+        windows,
+        encoder,
+        reservoir,
+        observables,
+    )
+
+    assert result.shape == (2, len(observables))
+
+
+def test_estimator_backend_supports_dense_encoding():
+    n_input_qubits = 3
+    n_features = 4
+
+    encoder = DenseAngleEncoding(n_input_qubits)
+    reservoir = RandomCircuitReservoir(
+        n_input_qubits,
+        N_MEM,
+        rng=np.random.default_rng(0),
+    )
+    observables = build_observables("Z+XX", n_input_qubits + N_MEM)
+    windows = np.random.default_rng(2).uniform(
+        0,
+        1,
+        (2, WINDOW_LENGTH, n_features),
+    )
+
+    result = EstimatorBackend().run_batch(
+        windows,
+        encoder,
+        reservoir,
+        observables,
+    )
+
+    assert result.shape == (2, len(observables))

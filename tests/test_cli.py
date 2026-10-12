@@ -87,3 +87,29 @@ def test_qrc_cli_selects_dense_encoding_when_qubits_are_fewer_than_features(monk
     encoder = protocol_args[0][0]
     assert isinstance(encoder, DenseAngleEncoding)
     assert encoder.num_qubits == 4
+
+def test_qrc_cli_runs_with_fewer_input_qubits(tmp_path):
+    """QRC should run when dense encoding is required."""
+    run_dir = main([
+        "qrc",
+        "--size",
+        "small",
+        "--n-input-qubits",
+        "6",
+        "--output-dir",
+        str(tmp_path),
+    ])
+
+    assert run_dir.exists()
+    assert {
+        p.name for p in run_dir.iterdir()
+    } == {
+        "config.json",
+        "metrics.json",
+        "scores.npz",
+    }
+
+    metrics = _metrics(run_dir)
+
+    for split in ("validation", "test"):
+        assert 0.0 <= metrics[split]["pr_auc"] <= 1.0
