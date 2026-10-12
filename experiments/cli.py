@@ -226,6 +226,7 @@ def qrc_features(data, args):
             scaling=args.encoding_scaling,
             rng=(args.seed, 1),
         )
+    encoder.input_width(len(FEATURE_SETS[args.feature_set]))
     reservoir = RandomCircuitReservoir(
         num_input_qubits=n_input_qubits,
         num_mem_qubits=args.n_mem_qubits,

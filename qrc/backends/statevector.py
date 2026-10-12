@@ -29,7 +29,8 @@ class StatevectorBackend(Backend):
         for values in window:
             circuit = QuantumCircuit(reservoir.num_qubits)
             # 1. encode into the input qubits
-            encoded_values = np.resize(np.asarray(values, dtype=float), reservoir.num_input_qubits)
+            input_width = encoder.input_width(values.size)
+            encoded_values = np.resize(np.asarray(values, dtype=float), input_width)
             circuit.compose(encoder.encode(encoded_values),
                             qubits=range(reservoir.num_input_qubits), inplace=True)
             # 2. evolve the whole register

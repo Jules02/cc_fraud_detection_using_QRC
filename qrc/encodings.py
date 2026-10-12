@@ -8,6 +8,12 @@ class Encoding:
     def __init__(self, num_qubits: int):
         self.num_qubits = num_qubits
 
+    def input_width(self, num_features: int) -> int:
+        """Return the number of values this encoding consumes per input step."""
+        if num_features < 1:
+            raise ValueError("Encoding requires at least one input feature.")
+        return self.num_qubits
+
 
 class AngleEncoding(Encoding):
 
@@ -172,6 +178,14 @@ class DenseAngleEncoding(Encoding):
         """
 
         self.scaling = math.pi / (max_value - min_value)
+
+    def input_width(self, num_features: int) -> int:
+        if num_features <= self.num_qubits or num_features > 2 * self.num_qubits:
+            raise ValueError(
+                f"Dense angle encoding requires between {self.num_qubits + 1} and "
+                f"{2 * self.num_qubits} input features, got {num_features}."
+            )
+        return num_features
 
     def encode(self, input, min_value=0.0):
         """Creates a dense angle encoding circuit for the given input data.
