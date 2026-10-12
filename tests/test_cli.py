@@ -60,7 +60,7 @@ def test_summary_records_reservoir_and_metrics(tmp_path):
     assert (row["observables"], row["n_observables"], row["seed"]) == ("XYZ", "24", "42")
     assert row["backend_precision"] == ""  # unused by the exact backend
     for split in ("validation", "test"):
-        for metric in ("pr_auc", "roc_auc", "f1_score", "precision", "recall"):
+        for metric in cli.METRIC_NAMES:
             assert row[f"{split}_{metric}"] != ""
 
 

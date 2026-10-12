@@ -33,5 +33,5 @@ def test_lstm_baseline_trains_and_reports_classification_metrics():
     for split in ("validation", "test"):
         assert len(results["scores"][split]) == 24
         assert results["metrics"][split]["threshold_used"] == 0.5
-        for metric in ("pr_auc", "f1_score", "precision", "recall", "roc_auc"):
+        for metric in ("pr_auc", "f1_score", "precision", "recall", "roc_auc", "matthews_corr_coef", "balanced_accuracy"):
             assert np.isfinite(results["metrics"][split][metric])

@@ -85,7 +85,7 @@ _SET_15 = _SET_10 + [
 ]
 FEATURE_SETS = {7: _SET_7, 10: _SET_10, 15: _SET_15}
 FEATURE_WINDOWS = (1, 7, 30, 90, 180)
-TRAIN_RATIO, VALIDATION_RATIO = 0.70, 0.15
+#TRAIN_RATIO, VALIDATION_RATIO = 0.70, 0.15
 
 # ~2 transactions per customer per day, so medium is ~35k transactions over a year.
 SIZES = {
@@ -96,7 +96,7 @@ SIZES = {
 SIMULATION = dict(nb_days=365, start_date="2025-01-01", r=5)
 
 BACKEND_NAMES = ("statevector", "estimator-exact", "gaussian", "shots")
-METRIC_NAMES = ("pr_auc", "roc_auc", "f1_score", "precision", "recall")
+METRIC_NAMES = ("pr_auc", "roc_auc", "f1_score", "precision", "recall", "matthews_corr_coef", "balanced_accuracy")
 EVAL_SPLITS = ("validation", "test")
 SUMMARY_FIELDS = (
     # run and data
@@ -131,12 +131,8 @@ def load_transactions(args):
     transactions = add_frauds(customer_profiles, terminal_profiles, transactions)
     if args.save_data:
         # Same layout as the shared dataset, so it can be reloaded with --data load
-        return split_and_save_dataset(
-            transactions, TRAIN_RATIO, VALIDATION_RATIO, output_dir=args.save_data
-        )
-    return split_dataset(
-        transactions, train_ratio=TRAIN_RATIO, validation_ratio=VALIDATION_RATIO
-    )
+        return split_and_save_dataset(transactions, output_dir=args.save_data)
+    return split_dataset(transactions)
 
 
 def prepare_data(args):

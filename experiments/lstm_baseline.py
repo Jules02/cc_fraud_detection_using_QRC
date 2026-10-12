@@ -6,7 +6,10 @@ import copy
 import time
 
 import numpy as np
-from sklearn.metrics import average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+    average_precision_score, balanced_accuracy_score, f1_score, matthews_corrcoef, precision_score, recall_score,
+    roc_auc_score,
+)
 from sklearn.preprocessing import StandardScaler
 
 
@@ -129,6 +132,8 @@ def run_lstm_baseline(
             "f1_score": f1_score(labels, predictions, zero_division=0),
             "precision": precision_score(labels, predictions, zero_division=0),
             "recall": recall_score(labels, predictions, zero_division=0),
+            "matthews_corr_coef": matthews_corrcoef(labels, predictions),
+            "balanced_accuracy": balanced_accuracy_score(labels, predictions),
             "threshold_used": 0.5,
         }
         scores[split] = split_scores
