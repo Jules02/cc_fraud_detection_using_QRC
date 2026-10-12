@@ -28,6 +28,7 @@ Examples:
     python -m experiments.cli qrc --size medium --backend estimator-exact
     python -m experiments.cli qrc --data load --data-dir data --backend gaussian --precision 0.05
 """
+
 import argparse
 import csv
 import json
@@ -45,7 +46,7 @@ from qrc.backends.statevector import StatevectorBackend
 from qrc.datasets import load_split_files, split_dataset
 from qrc.datasets.create_dataset import add_frauds, generate_dataset
 from qrc.datasets.split_dataset import main as split_and_save_dataset
-from qrc.encodings import AngleEncoding, ReuploadingEncoding
+from qrc.encodings import AngleEncoding, ReuploadingEncoding, DenseAngleEncoding
 from qrc.features import FeatureEngineer
 from qrc.logger import get_logger
 from qrc.observables import build_observables
@@ -123,13 +124,19 @@ def load_transactions(args):
         splits = load_split_files(data_dir, args.start_date, args.end_date)
         return tuple(splits[split] for split in SPLITS)
 
-    simulation = dict(SIZES[args.size], **SIMULATION, default_random_state=args.data_seed)
+    simulation = dict(
+        SIZES[args.size], **SIMULATION, default_random_state=args.data_seed
+    )
     customer_profiles, terminal_profiles, transactions = generate_dataset(**simulation)
     transactions = add_frauds(customer_profiles, terminal_profiles, transactions)
     if args.save_data:
         # Same layout as the shared dataset, so it can be reloaded with --data load
-        return split_and_save_dataset(transactions, TRAIN_RATIO, VALIDATION_RATIO, output_dir=args.save_data)
-    return split_dataset(transactions, train_ratio=TRAIN_RATIO, validation_ratio=VALIDATION_RATIO)
+        return split_and_save_dataset(
+            transactions, TRAIN_RATIO, VALIDATION_RATIO, output_dir=args.save_data
+        )
+    return split_dataset(
+        transactions, train_ratio=TRAIN_RATIO, validation_ratio=VALIDATION_RATIO
+    )
 
 
 def prepare_data(args):
@@ -143,17 +150,26 @@ def prepare_data(args):
     train, validation, test = load_transactions(args)
 
     full_data = pd.concat([train, validation, test], ignore_index=True)
-    full_data = full_data.drop(columns=["TX_FRAUD_SCENARIO"], errors="ignore")  # avoid data leakage
+    full_data = full_data.drop(
+        columns=["TX_FRAUD_SCENARIO"], errors="ignore"
+    )  # avoid data leakage
 
     feature_engineer = FeatureEngineer(windows=FEATURE_WINDOWS, save=False)
-    train_features, validation_features, test_features = feature_engineer.run(full_data, train, validation, test)
+    train_features, validation_features, test_features = feature_engineer.run(
+        full_data, train, validation, test
+    )
 
     processor = DataProcessor(feature_sets=FEATURE_SETS)
-    input_data = processor.process(train_features, validation_features, test_features, feature_set=args.feature_set)
+    input_data = processor.process(
+        train_features, validation_features, test_features, feature_set=args.feature_set
+    )
 
     data = window_by_customer_id(input_data, args.window_length)
     data["summary"] = {
-        split: {"samples": len(data[f"y_{split}"]), "frauds": int(data[f"y_{split}"].sum())}
+        split: {
+            "samples": len(data[f"y_{split}"]),
+            "frauds": int(data[f"y_{split}"].sum()),
+        }
         for split in SPLITS
     }
     return data
@@ -170,16 +186,23 @@ def print_data_summary(data):
 def make_backend(name, precision, seed, reset_inputs=False):
     if name == "statevector":
         if reset_inputs:
-            raise ValueError("--reset-inputs needs an Estimator backend, not statevector")
+            raise ValueError(
+                "--reset-inputs needs an Estimator backend, not statevector"
+            )
         return StatevectorBackend()
     if name == "estimator-exact":
         return EstimatorBackend(reset_inputs=reset_inputs)
-    return EstimatorBackend(precision=precision, seed=seed, sampling=name, reset_inputs=reset_inputs)
+    return EstimatorBackend(
+        precision=precision, seed=seed, sampling=name, reset_inputs=reset_inputs
+    )
 
 
 def baseline_features(data):
     """Raw windows, flattened ``(n, L, F) → (n, L·F)``: what the readout sees without a reservoir."""
-    return {split: data[f"X_{split}"].reshape(len(data[f"X_{split}"]), -1) for split in SPLITS}
+    return {
+        split: data[f"X_{split}"].reshape(len(data[f"X_{split}"]), -1)
+        for split in SPLITS
+    }
 
 
 def qrc_features(data, args):
@@ -191,12 +214,29 @@ def qrc_features(data, args):
     """
     n_input_qubits = args.n_input_qubits or len(FEATURE_SETS[args.feature_set])
     if args.encoding_layers == 1:
-        encoder = AngleEncoding(num_qubits=n_input_qubits, scaling=args.encoding_scaling)
+        # if we have more features than qubits, we use dense angle else regular
+        if n_input_qubits < len(FEATURE_SETS[args.feature_set]):
+            encoder = DenseAngleEncoding(
+                num_qubits=n_input_qubits, scaling=args.encoding_scaling
+            )
+        else:
+            encoder = AngleEncoding(
+                num_qubits=n_input_qubits, scaling=args.encoding_scaling
+            )
     else:
-        encoder = ReuploadingEncoding(num_qubits=n_input_qubits, num_layers=args.encoding_layers,
-                                      scaling=args.encoding_scaling, rng=(args.seed, 1))
-    reservoir = RandomCircuitReservoir(num_input_qubits=n_input_qubits, num_mem_qubits=args.n_mem_qubits,
-                                       depth=args.depth, entangler=args.entangler, rng=args.seed)
+        encoder = ReuploadingEncoding(
+            num_qubits=n_input_qubits,
+            num_layers=args.encoding_layers,
+            scaling=args.encoding_scaling,
+            rng=(args.seed, 1),
+        )
+    reservoir = RandomCircuitReservoir(
+        num_input_qubits=n_input_qubits,
+        num_mem_qubits=args.n_mem_qubits,
+        depth=args.depth,
+        entangler=args.entangler,
+        rng=args.seed,
+    )
     observables = build_observables(args.observables, reservoir.num_qubits)
     backend = make_backend(args.backend, args.precision, args.seed, args.reset_inputs)
     protocol = QRCProtocol(encoder, reservoir, observables, backend)
@@ -205,8 +245,11 @@ def qrc_features(data, args):
     for split in SPLITS:
         print(f"running {args.backend} on {split} ...", flush=True)
         features[split] = protocol.run(data[f"X_{split}"])
-    reservoir_info = {"n_input_qubits": n_input_qubits, "n_qubits": reservoir.num_qubits,
-                      "n_observables": len(observables)}
+    reservoir_info = {
+        "n_input_qubits": n_input_qubits,
+        "n_qubits": reservoir.num_qubits,
+        "n_observables": len(observables),
+    }
     return features, reservoir_info
 
 
@@ -217,7 +260,9 @@ def fit_and_evaluate(features, data, alpha):
 
     metrics, scores = {}, {}
     for split in ("validation", "test"):
-        split_metrics, _, _, split_scores = readout.evaluate(features[split], data[f"y_{split}"])
+        split_metrics, _, _, split_scores = readout.evaluate(
+            features[split], data[f"y_{split}"]
+        )
         metrics[split] = {k: float(v) for k, v in split_metrics.items()}
         scores[split] = split_scores
     return metrics, scores
@@ -227,10 +272,19 @@ def fit_and_evaluate(features, data, alpha):
 
 def data_source(args):
     if args.data == "load":
-        return {"data": "load", "data_dir": str(args.data_dir),
-                "start_date": args.start_date, "end_date": args.end_date}
-    return {"data": "simulate", "size": args.size, "data_seed": args.data_seed,
-            **SIZES[args.size], **SIMULATION}
+        return {
+            "data": "load",
+            "data_dir": str(args.data_dir),
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+        }
+    return {
+        "data": "simulate",
+        "size": args.size,
+        "data_seed": args.data_seed,
+        **SIZES[args.size],
+        **SIMULATION,
+    }
 
 
 def git_commit():
@@ -268,11 +322,18 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
         row.update(
             backend=args.backend,
             # only the sampled backends use it
-            backend_precision=args.precision if args.backend in ("gaussian", "shots") else "",
-            encoding_layers=args.encoding_layers, encoding_scaling=args.encoding_scaling,
-            n_mem_qubits=args.n_mem_qubits, depth=args.depth, entangler=args.entangler,
+            backend_precision=(
+                args.precision if args.backend in ("gaussian", "shots") else ""
+            ),
+            encoding_layers=args.encoding_layers,
+            encoding_scaling=args.encoding_scaling,
+            n_mem_qubits=args.n_mem_qubits,
+            depth=args.depth,
+            entangler=args.entangler,
             reset_inputs=args.reset_inputs,
-            observables=args.observables, seed=args.seed, **reservoir_info,
+            observables=args.observables,
+            seed=args.seed,
+            **reservoir_info,
         )
     elif args.command == "lstm":
         row.update(seed=args.seed)
@@ -315,7 +376,12 @@ def save_run(args, data, metrics, scores, extra, reservoir_info=None):
 
 
 def print_metrics(metrics):
-    table = pd.DataFrame({split: {m: metrics[split][m] for m in METRIC_NAMES} for split in ("validation", "test")}).T
+    table = pd.DataFrame(
+        {
+            split: {m: metrics[split][m] for m in METRIC_NAMES}
+            for split in ("validation", "test")
+        }
+    ).T
     print()
     print(table.to_string(float_format=lambda v: f"{v:.4f}"))
 
@@ -325,19 +391,44 @@ def print_metrics(metrics):
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
     data = common.add_argument_group("data")
-    data.add_argument("--data", choices=("simulate", "load"), default="simulate",
-                      help="simulate a dataset, or load the split .pkl files from --data-dir")
-    data.add_argument("--size", choices=tuple(SIZES), default="medium", help="simulation preset")
+    data.add_argument(
+        "--data",
+        choices=("simulate", "load"),
+        default="simulate",
+        help="simulate a dataset, or load the split .pkl files from --data-dir",
+    )
+    data.add_argument(
+        "--size", choices=tuple(SIZES), default="medium", help="simulation preset"
+    )
     data.add_argument("--data-seed", type=int, default=0, help="simulation seed")
-    data.add_argument("--save-data", type=Path, default=None,
-                      help="also write the simulated splits here (reload with --data load --data-dir)")
-    data.add_argument("--data-dir", type=Path, default=PROJECT_ROOT / "data",
-                      help="directory holding transactions_{train,validation,test}.pkl")
-    data.add_argument("--start-date", default=None, help="first day to load, YYYY-MM-DD (--data load)")
-    data.add_argument("--end-date", default=None, help="last day to load, YYYY-MM-DD (--data load)")
-    data.add_argument("--feature-set", type=int, choices=tuple(FEATURE_SETS), default=7,
-                      help="selected features: 7, 10 or 15 (each extends the previous)")
-    data.add_argument("--window-length", type=int, default=3, help="transactions per customer window")
+    data.add_argument(
+        "--save-data",
+        type=Path,
+        default=None,
+        help="also write the simulated splits here (reload with --data load --data-dir)",
+    )
+    data.add_argument(
+        "--data-dir",
+        type=Path,
+        default=PROJECT_ROOT / "data",
+        help="directory holding transactions_{train,validation,test}.pkl",
+    )
+    data.add_argument(
+        "--start-date", default=None, help="first day to load, YYYY-MM-DD (--data load)"
+    )
+    data.add_argument(
+        "--end-date", default=None, help="last day to load, YYYY-MM-DD (--data load)"
+    )
+    data.add_argument(
+        "--feature-set",
+        type=int,
+        choices=tuple(FEATURE_SETS),
+        default=7,
+        help="selected features: 7, 10 or 15 (each extends the previous)",
+    )
+    data.add_argument(
+        "--window-length", type=int, default=3, help="transactions per customer window"
+    )
 
     run = argparse.ArgumentParser(add_help=False)
     run.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "results" / "runs")
@@ -379,10 +470,15 @@ def build_parser():
     qrc_parser.add_argument("--n-mem-qubits", type=int, default=2)
     qrc_parser.add_argument("--depth", type=int, default=2)
     qrc_parser.add_argument("--entangler", choices=("cx", "cry"), default="cx")
-    qrc_parser.add_argument("--reset-inputs", action="store_true",
-                            help="reset the input qubits before each encoding step (density-matrix simulation)")
+    qrc_parser.add_argument(
+        "--reset-inputs",
+        action="store_true",
+        help="reset the input qubits before each encoding step (density-matrix simulation)",
+    )
     qrc_parser.add_argument("--observables", default="Z")
-    qrc_parser.add_argument("--seed", type=int, default=42, help="reservoir and sampling seed")
+    qrc_parser.add_argument(
+        "--seed", type=int, default=42, help="reservoir and sampling seed"
+    )
     return parser
 
 
