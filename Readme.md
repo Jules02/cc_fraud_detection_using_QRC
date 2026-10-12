@@ -65,8 +65,9 @@ All commands run the same data preparation:
 data (simulated or loaded) → feature engineering → DataProcessor → per-customer windows
 ```
 
-The readout is fitted on **train only**. PR-AUC, ROC-AUC, F1, precision and recall are reported
-on **validation and test**. Nothing is tuned on validation.
+Models are fitted on **train only**. PR-AUC, ROC-AUC, F1, precision, recall, Matthews correlation
+coefficient (MCC) and balanced accuracy are reported on **validation and test**. Nothing is tuned on
+validation, except that the `lstm` command uses validation loss for early stopping.
 
 Run `python -m experiments.cli <command> --help` to list every option.
 
@@ -131,10 +132,13 @@ python -m experiments.cli qrc --data load --backend gaussian --precision 0.05
 |--------------------|-----------------|-------------------------------------------------------------------------|
 | `--backend`        | `estimator-exact` | `estimator-exact`, `statevector`, `gaussian` or `shots` (see below)   |
 | `--precision`      | `0.05`          | Target standard error per expectation value (`gaussian` / `shots`)      |
-| `--n-input-qubits` | number of features | Input qubits                                                         |
+| `--n-input-qubits` | number of features | Input qubits. With fewer qubits than features, dense angle encoding is used (see below) |
 | `--n-mem-qubits`   | `2`             | Memory qubits                                                           |
 | `--depth`          | `2`             | Reservoir circuit depth                                                 |
 | `--entangler`      | `cx`            | `cx` or `cry`                                                           |
+| `--encoding-layers`  | `1`           | Times each transaction is encoded (data re-uploading). `1` is plain angle encoding |
+| `--encoding-scaling` | `π`           | Rotation angle per unit of (scaled) feature, in each encoding layer     |
+| `--reset-inputs`   | off             | Reset the input qubits before each transaction is encoded. Needs an Estimator backend (density-matrix simulation, slower) |
 | `--observables`    | `Z`             | E.g. `Z`, `Z+ZZ`, `XX-all`, `XYZ` (see `build_observables` in `qrc/observables.py`) |
 | `--seed`           | `42`            | Reservoir and sampling seed                                             |
 
@@ -144,6 +148,16 @@ The backends:
 - `statevector`: exact simulation that runs one window at a time with `qiskit.quantum_info.Statevector`. It is the simple reference implementation: same results as `estimator-exact`, but several times slower.
 - `gaussian`: exact expectation values plus Gaussian noise of width `--precision`. This is a cheap stand-in for shot noise.
 - `shots`: real shot sampling with about `1/precision²` shots.
+
+The encodings:
+
+- **Angle encoding** (default): one feature per input qubit, as a `RY` rotation of `scaling × feature`.
+- **Dense angle encoding**: used automatically when `--n-input-qubits` is smaller than the number of
+  features (with `--encoding-layers 1`). Each qubit carries up to two features: one as a `RY`
+  rotation, one as a `RZ` rotation. So the number of features can be at most twice `--n-input-qubits`.
+- **Re-uploading** (`--encoding-layers` > 1): the transaction is angle-encoded several times, with
+  fixed random `RZ` rotations in between. Each feature then enters with frequencies up to
+  `layers × scaling`.
 
 ### Results
 
@@ -158,10 +172,11 @@ by side. A row records:
 
 - the run: its name, the git commit (with `-dirty` if there were uncommitted changes) and the command;
 - the data: its source, feature set, window length, and the size and fraud count of each split;
-- for `qrc`, the reservoir: backend, precision, qubit counts, depth, entangler, observables and seed,
-  plus the reservoir runtime;
-- the readout: `alpha`, the decision threshold, and every metric (PR-AUC, ROC-AUC, F1, precision,
-  recall) on validation and test.
+- for `qrc`, the reservoir: backend, precision, encoding layers and scaling, qubit counts, depth,
+  entangler, input reset, observables and seed, plus the reservoir runtime;
+- for `lstm`, the training seed and training time;
+- the readout: `alpha` (empty for `lstm`), the decision threshold, and every metric (PR-AUC, ROC-AUC,
+  F1, precision, recall, MCC, balanced accuracy) on validation and test.
 
 `results/` is git-ignored.
 
