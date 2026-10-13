@@ -47,6 +47,7 @@ from qrc.datasets import load_split_files, split_dataset
 from qrc.datasets.create_dataset import add_frauds, generate_dataset
 from qrc.datasets.split_dataset import main as split_and_save_dataset
 from qrc.encodings import AngleEncoding, ReuploadingEncoding, DenseAngleEncoding
+from qrc.evaluation import CATEGORIES, categorize, category_metrics
 from qrc.features import FeatureEngineer
 from qrc.logger import get_logger
 from qrc.observables import build_observables
@@ -97,12 +98,14 @@ SIMULATION = dict(nb_days=365, start_date="2025-01-01", r=5)
 
 BACKEND_NAMES = ("statevector", "estimator-exact", "gaussian", "shots")
 METRIC_NAMES = ("average_precision", "roc_auc", "f1_score", "precision", "recall", "matthews_corr_coef", "balanced_accuracy")
+# per fraud category (qrc.evaluation); only when the data carries TX_FRAUD_SCENARIO
+CATEGORY_METRIC_NAMES = tuple(f"average_precision_{c}" for c in CATEGORIES)
 EVAL_SPLITS = ("validation", "test")
 SUMMARY_FIELDS = (
     # run and data
     "run", "commit", "command", "data", "size", "data_seed", "data_dir", "start_date", "end_date",
     "feature_set", "n_features", "window_length",
-    *(f"{split}_{k}" for split in SPLITS for k in ("samples", "frauds")),
+    *(f"{split}_{k}" for split in SPLITS for k in ("samples", "frauds", *(f"frauds_{c}" for c in CATEGORIES))),
     # reservoir (qrc only)
     "backend", "backend_precision", "encoding_layers", "encoding_scaling", "n_input_qubits", "n_mem_qubits", "n_qubits", "depth", "entangler",
     "reset_inputs", "observables", "n_observables", "seed", "reservoir_seconds",
@@ -110,7 +113,7 @@ SUMMARY_FIELDS = (
     "training_seconds",
     # readout and metrics
     "alpha", "threshold",
-    *(f"{split}_{m}" for split in EVAL_SPLITS for m in METRIC_NAMES),
+    *(f"{split}_{m}" for split in EVAL_SPLITS for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES)),
 )
 
 
@@ -146,6 +149,11 @@ def prepare_data(args):
     train, validation, test = load_transactions(args)
 
     full_data = pd.concat([train, validation, test], ignore_index=True)
+    # kept aside for evaluation only, looked up by transaction since feature engineering reorders rows
+    meta = (
+        full_data.set_index("TRANSACTION_ID")[["TX_FRAUD", "TX_FRAUD_SCENARIO", "TX_AMOUNT"]]
+        if "TX_FRAUD_SCENARIO" in full_data else None
+    )
     full_data = full_data.drop(
         columns=["TX_FRAUD_SCENARIO"], errors="ignore"
     )  # avoid data leakage
@@ -168,6 +176,15 @@ def prepare_data(args):
         }
         for split in SPLITS
     }
+    if meta is not None:
+        for split in SPLITS:
+            rows = meta.loc[data[f"ids_{split}"]]
+            category = categorize(rows["TX_FRAUD"], rows["TX_FRAUD_SCENARIO"], rows["TX_AMOUNT"])
+            if not np.array_equal(category != "legit", data[f"y_{split}"] == 1):
+                raise ValueError(f"{split}: fraud categories do not line up with the labels")
+            data[f"category_{split}"] = category
+            for c in CATEGORIES:
+                data["summary"][split][f"frauds_{c}"] = int((category == c).sum())
     return data
 
 
@@ -309,10 +326,11 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
         "feature_set": args.feature_set,
         "n_features": len(FEATURE_SETS[args.feature_set]),
         "window_length": args.window_length,
-        **{f"{split}_{k}": data["summary"][split][k] for split in SPLITS for k in ("samples", "frauds")},
+        **{f"{split}_{k}": v for split in SPLITS for k, v in data["summary"][split].items()},
         "alpha": getattr(args, "alpha", ""),  # lstm has no logistic readout
         "threshold": metrics["test"]["threshold_used"],
-        **{f"{split}_{m}": metrics[split][m] for split in EVAL_SPLITS for m in METRIC_NAMES},
+        **{f"{split}_{m}": metrics[split][m] for split in EVAL_SPLITS
+           for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES) if m in metrics[split]},
         **extra,
     }
     if args.command == "qrc":
@@ -365,7 +383,8 @@ def save_run(args, data, metrics, scores, extra, reservoir_info=None):
     (run_dir / "config.json").write_text(json.dumps(config, indent=2))
     (run_dir / "metrics.json").write_text(json.dumps({**metrics, **extra}, indent=2))
     np.savez(run_dir / "scores.npz",
-             **{f"y_{split}": data[f"y_{split}"] for split in scores},
+             **{f"{key}_{split}": data[f"{key}_{split}"] for split in scores
+                for key in ("y", "ids", "category") if f"{key}_{split}" in data},
              **{f"scores_{split}": s for split, s in scores.items()})
 
     append_summary(output_dir / "summary.csv", row)
@@ -381,6 +400,15 @@ def print_metrics(metrics):
     ).T
     print()
     print(table.to_string(float_format=lambda v: f"{v:.4f}"))
+    if CATEGORY_METRIC_NAMES[0] in metrics["test"]:
+        by_category = pd.DataFrame(
+            {
+                split: {m: metrics[split][m] for m in CATEGORY_METRIC_NAMES}
+                for split in ("validation", "test")
+            }
+        ).T
+        print()
+        print(by_category.to_string(float_format=lambda v: f"{v:.4f}"))
 
 
 # --------------------------------------------------------------------------- CLI
@@ -512,6 +540,11 @@ def main(argv=None):
         features, reservoir_info = qrc_features(data, args)
         extra["reservoir_seconds"] = time.perf_counter() - start
         metrics, scores = fit_and_evaluate(features, data, args.alpha)
+    for split, split_scores in scores.items():
+        if f"category_{split}" in data:
+            metrics[split].update(
+                category_metrics(data[f"y_{split}"], split_scores, data[f"category_{split}"])
+            )
     run_dir = save_run(args, data, metrics, scores, extra, reservoir_info)
     print_metrics(metrics)
     print(f"\nResults saved to {run_dir}")

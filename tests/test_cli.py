@@ -35,10 +35,16 @@ def test_run_saves_results(tmp_path, command):
     }
     for split in ("validation", "test"):
         assert 0.0 <= _metrics(run_dir)[split]["average_precision"] <= 1.0
+        assert "average_precision_customer" in _metrics(run_dir)[split]
+
+    saved = np.load(run_dir / "scores.npz")
+    assert np.array_equal(saved["category_test"] != "legit", saved["y_test"] == 1)
+    assert len(saved["ids_test"]) == len(saved["scores_test"])
 
     with open(tmp_path / "summary.csv", newline="") as f:
         rows = list(csv.DictReader(f))
     assert [row["run"] for row in rows] == [run_dir.name]
+    assert sum(int(rows[0][f"test_frauds_{c}"]) for c in ("amount", "terminal", "customer")) == int(rows[0]["test_frauds"])
 
 
 def test_saved_simulation_reloads_identically(tmp_path):

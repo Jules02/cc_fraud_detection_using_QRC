@@ -77,5 +77,9 @@ class DataProcessor:
             "groups_validation": validation["CUSTOMER_ID"].to_numpy(),
             "groups_test": test["CUSTOMER_ID"].to_numpy(),
 
+            "ids_train": train["TRANSACTION_ID"].to_numpy(),
+            "ids_validation": validation["TRANSACTION_ID"].to_numpy(),
+            "ids_test": test["TRANSACTION_ID"].to_numpy(),
+
             "features": self.feature_sets[feature_set],
         }
