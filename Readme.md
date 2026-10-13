@@ -65,7 +65,7 @@ All commands run the same data preparation:
 data (simulated or loaded) → feature engineering → DataProcessor → per-customer windows
 ```
 
-Models are fitted on **train only**. PR-AUC, ROC-AUC, F1, precision, recall, Matthews correlation
+Models are fitted on **train only**. Average precision (AP), ROC-AUC, F1, precision, recall, Matthews correlation
 coefficient (MCC) and balanced accuracy are reported on **validation and test**. Nothing is tuned on
 validation, except that the `lstm` command uses validation loss for early stopping.
 
@@ -175,7 +175,7 @@ by side. A row records:
 - for `qrc`, the reservoir: backend, precision, encoding layers and scaling, qubit counts, depth,
   entangler, input reset, observables and seed, plus the reservoir runtime;
 - for `lstm`, the training seed and training time;
-- the readout: `alpha` (empty for `lstm`), the decision threshold, and every metric (PR-AUC, ROC-AUC,
+- the readout: `alpha` (empty for `lstm`), the decision threshold, and every metric (average precision, ROC-AUC,
   F1, precision, recall, MCC, balanced accuracy) on validation and test.
 
 `results/` is git-ignored.

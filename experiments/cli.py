@@ -96,7 +96,7 @@ SIZES = {
 SIMULATION = dict(nb_days=365, start_date="2025-01-01", r=5)
 
 BACKEND_NAMES = ("statevector", "estimator-exact", "gaussian", "shots")
-METRIC_NAMES = ("pr_auc", "roc_auc", "f1_score", "precision", "recall", "matthews_corr_coef", "balanced_accuracy")
+METRIC_NAMES = ("average_precision", "roc_auc", "f1_score", "precision", "recall", "matthews_corr_coef", "balanced_accuracy")
 EVAL_SPLITS = ("validation", "test")
 SUMMARY_FIELDS = (
     # run and data

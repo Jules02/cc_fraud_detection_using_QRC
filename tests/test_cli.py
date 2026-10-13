@@ -34,7 +34,7 @@ def test_run_saves_results(tmp_path, command):
         "scores.npz",
     }
     for split in ("validation", "test"):
-        assert 0.0 <= _metrics(run_dir)[split]["pr_auc"] <= 1.0
+        assert 0.0 <= _metrics(run_dir)[split]["average_precision"] <= 1.0
 
     with open(tmp_path / "summary.csv", newline="") as f:
         rows = list(csv.DictReader(f))
@@ -156,7 +156,7 @@ def test_qrc_cli_runs_with_dense_encoding(tmp_path):
 
     config = json.loads((run_dir / "config.json").read_text())
     assert config["reservoir"]["n_input_qubits"] == 6
-    assert 0.0 <= _metrics(run_dir)["test"]["pr_auc"] <= 1.0
+    assert 0.0 <= _metrics(run_dir)["test"]["average_precision"] <= 1.0
 
 
 def test_qrc_cli_runs_with_fewer_input_qubits(tmp_path):
@@ -183,4 +183,4 @@ def test_qrc_cli_runs_with_fewer_input_qubits(tmp_path):
     metrics = _metrics(run_dir)
 
     for split in ("validation", "test"):
-        assert 0.0 <= metrics[split]["pr_auc"] <= 1.0
+        assert 0.0 <= metrics[split]["average_precision"] <= 1.0

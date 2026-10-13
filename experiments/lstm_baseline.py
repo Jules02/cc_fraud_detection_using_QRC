@@ -127,7 +127,7 @@ def run_lstm_baseline(
 
         predictions = (split_scores >= 0.5).astype(int)
         metrics[split] = {
-            "pr_auc": average_precision_score(labels, split_scores),
+            "average_precision": average_precision_score(labels, split_scores),
             "roc_auc": roc_auc_score(labels, split_scores),
             "f1_score": f1_score(labels, predictions, zero_division=0),
             "precision": precision_score(labels, predictions, zero_division=0),
