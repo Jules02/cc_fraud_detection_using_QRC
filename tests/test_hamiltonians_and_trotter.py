@@ -87,10 +87,17 @@ def test_tfim_specific_structure_and_randomized_params():
     assert len(h_native.params) == 7
 
     h_exchange = native_exchange(4, v=1.5, eta=0.7)
-    assert h_exchange.name == "tfim-native"
+    assert h_exchange.name == "native-exchange"
     assert len(h_exchange.params) == 10
     assert all(key.startswith(("J", "g", "etaJ")) for key in h_exchange.params)
     assert all(np.isfinite(value) for value in h_exchange.params.values())
+
+
+def test_hamiltonian_builder_rng_is_reproducible():
+    first = tfim_longitudinal(4, rng=123)
+    second = tfim_longitudinal(4, rng=123)
+
+    assert first.params == second.params
 
 
 @pytest.mark.parametrize(

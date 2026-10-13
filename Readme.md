@@ -83,6 +83,9 @@ python -m experiments.cli lstm --size small --epochs 10
 # QRC with the exact Qiskit Estimator
 python -m experiments.cli qrc --size medium --backend estimator-exact
 
+# QRC with a ring-topology TFIM Hamiltonian reservoir
+python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
+
 # QRC with shot noise (~1/precision² shots per expectation value)
 python -m experiments.cli qrc --size medium --backend shots --precision 0.05
 
@@ -134,6 +137,8 @@ python -m experiments.cli qrc --data load --backend gaussian --precision 0.05
 | `--precision`      | `0.05`          | Target standard error per expectation value (`gaussian` / `shots`)      |
 | `--n-input-qubits` | number of features | Input qubits. With fewer qubits than features, dense angle encoding is used (see below) |
 | `--n-mem-qubits`   | `2`             | Memory qubits                                                           |
+| `--hamiltonian`    | `random`        | `random`, `tfim`, `tfim_longitudinal`, `tfim_native` or `native-exchange` |
+| `--topology`       | `linear`        | Hamiltonian connectivity: `linear`, `ring` or `fully_connected`; ignored for `--hamiltonian random` |
 | `--depth`          | `2`             | Reservoir circuit depth                                                 |
 | `--entangler`      | `cx`            | `cx` or `cry`                                                           |
 | `--encoding-layers`  | `1`           | Times each transaction is encoded (data re-uploading). `1` is plain angle encoding |
@@ -148,6 +153,9 @@ The backends:
 - `statevector`: exact simulation that runs one window at a time with `qiskit.quantum_info.Statevector`. It is the simple reference implementation: same results as `estimator-exact`, but several times slower.
 - `gaussian`: exact expectation values plus Gaussian noise of width `--precision`. This is a cheap stand-in for shot noise.
 - `shots`: real shot sampling with about `1/precision²` shots.
+
+The reservoir can be a random circuit (the default) or a Trotterized Hamiltonian model.
+The Hamiltonian choice and topology are included in the run configuration and summary.
 
 The encodings:
 
