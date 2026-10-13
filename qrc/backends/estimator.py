@@ -41,16 +41,31 @@ class EstimatorBackend(Backend):
         batch_size (int): number of samples (whole windows) per PUB. Windows are never
             split across PUBs. Aer slows down on very large PUBs, so large datasets are
             split into several PUBs, all submitted in a single job.
+        reset_inputs (bool): reset the input qubits to |0> before each encoding step after
+            the first, so each transaction overwrites the input register instead of rotating
+            on top of the previous state. Memory qubits are never reset. Reset is not unitary,
+            so this switches Aer to its density-matrix method (exact, but memory grows as 4**n).
     """
 
-    def __init__(self, precision: float = 0.0, noise_model: Optional[NoiseModel] = None,
-                 seed: Optional[int] = None, sampling: str = "gaussian", batch_size: int = 250):
+    def __init__(
+        self,
+        precision: float = 0.0,
+        noise_model: Optional[NoiseModel] = None,
+        seed: Optional[int] = None,
+        sampling: str = "gaussian",
+        batch_size: int = 250,
+        reset_inputs: bool = False,
+    ):
         if sampling not in SAMPLING_MODES:
-            raise ValueError(f"sampling must be one of {SAMPLING_MODES}, got {sampling!r}")
+            raise ValueError(
+                f"sampling must be one of {SAMPLING_MODES}, got {sampling!r}"
+            )
         if precision < 0:
             raise ValueError("precision must be non-negative")
         if sampling == "shots" and precision == 0:
-            raise ValueError("sampling='shots' needs precision > 0 (number of shots ~ 1 / precision**2)")
+            raise ValueError(
+                "sampling='shots' needs precision > 0 (number of shots ~ 1 / precision**2)"
+            )
         if batch_size < 1:
             raise ValueError(f"batch_size must be at least 1, got {batch_size}")
         self.batch_size = batch_size
@@ -58,59 +73,94 @@ class EstimatorBackend(Backend):
         self.noise_model = noise_model
         self.seed = seed
         self.sampling = sampling
+        self.reset_inputs = reset_inputs
 
         backend_options = {}
         if noise_model is not None:
             backend_options["noise_model"] = noise_model
+        if reset_inputs:
+            backend_options["method"] = "density_matrix"
         if sampling == "gaussian":
             self._backend = None
             run_options = {} if seed is None else {"seed_simulator": seed}
-            self.estimator = AerEstimator(options={
-                "default_precision": precision,
-                "backend_options": backend_options,
-                "run_options": run_options,
-            })
+            self.estimator = AerEstimator(
+                options={
+                    "default_precision": precision,
+                    "backend_options": backend_options,
+                    "run_options": run_options,
+                }
+            )
         else:
             if seed is not None:
                 backend_options["seed_simulator"] = seed
             self._backend = AerSimulator(**backend_options)
-            self.estimator = BackendEstimatorV2(backend=self._backend,
-                                                options={"default_precision": precision})
+            self.estimator = BackendEstimatorV2(
+                backend=self._backend, options={"default_precision": precision}
+            )
 
-    def _build_circuit(self, encoder: Encoding, reservoir: Reservoir, window_length: int) -> QuantumCircuit:
-        """Build the parametrized circuit for a window of ``window_length`` transactions.
-        Has ``window_length * num_input_qubits`` parameters, ordered transaction by transaction."""
+    def _build_circuit(
+        self,
+        encoder: Encoding,
+        reservoir: Reservoir,
+        window_length: int,
+        input_width: int,
+    ) -> QuantumCircuit:
+        """Build the parametrized circuit for a window of `window_length`
+        transactions, with `input_width` parameters per transaction.
+        Parameters are ordered transaction by transaction.
+        """
         n_in = reservoir.num_input_qubits
-        theta = ParameterVector("x", window_length * n_in)
+        theta = ParameterVector("x", window_length * input_width)
         reservoir_circuit = reservoir.circuit()
         circuit = QuantumCircuit(reservoir.num_qubits)
+
         for t in range(window_length):
-            # 1. encode into the input qubits
-            circuit.compose(encoder.encode(theta[t * n_in:(t + 1) * n_in]),
-                            qubits=range(n_in), inplace=True)
-            # 2. evolve the whole register
+            # 1. Discard and re-prepare the input qubits if enabled.
+            if self.reset_inputs and t > 0:
+                circuit.reset(range(n_in))
+
+            # 2. Encode all features for this transaction.
+            start = t * input_width
+            end = (t + 1) * input_width
+            circuit.compose(
+                encoder.encode(theta[start:end]),
+                qubits=range(encoder.num_qubits),
+                inplace=True,
+            )
+
+            # 3. Evolve the whole register.
             circuit.compose(reservoir_circuit, inplace=True)
-            # 3. discard and re-prepare the input qubits
-            # TODO
+
         return circuit
 
-    def run_batch(self, windows: np.ndarray, encoder: Encoding, reservoir: Reservoir, observables: PauliList) -> np.ndarray:
+    def run_batch(
+        self,
+        windows: np.ndarray,
+        encoder: Encoding,
+        reservoir: Reservoir,
+        observables: PauliList,
+    ) -> np.ndarray:
         """Run all windows in one job, ``batch_size`` windows per PUB. Observables are measured only once, after the last transaction.
         Returns np array with shape ``(samples, observables)``."""
         samples, window_length, num_features = windows.shape
         if samples == 0:
             return np.empty((0, len(observables)))
-        n_in = reservoir.num_input_qubits
-        circuit = self._build_circuit(encoder, reservoir, window_length)
+        input_width = encoder.input_width(num_features)
+        circuit = self._build_circuit(encoder, reservoir, window_length, input_width)
         if self._backend is not None:
             circuit = transpile(circuit, self._backend, optimization_level=0)
 
-        # tile/truncate the features onto the input qubits
-        resized = windows[..., np.arange(n_in) % num_features]
+        # Repeat/truncate features only when the encoding consumes fewer values than
+        # there are input features; dense encoding keeps its full feature vector.
+        resized = windows[..., np.arange(input_width) % num_features]
         # (samples, 1, parameters): the singleton axis broadcasts against the observables
-        parameter_values = resized.astype(float).reshape(samples, 1, window_length * n_in)
+        parameter_values = resized.astype(float).reshape(
+            samples, 1, window_length * input_width
+        )
 
-        pubs = [(circuit, observables, parameter_values[start:start + self.batch_size])
-                for start in range(0, samples, self.batch_size)]
+        pubs = [
+            (circuit, observables, parameter_values[start : start + self.batch_size])
+            for start in range(0, samples, self.batch_size)
+        ]
         job = self.estimator.run(pubs)
         return np.concatenate([np.asarray(result.data.evs) for result in job.result()])

@@ -13,23 +13,26 @@ Data sources (``--data``):
 
 Commands:
     prepare   data preparation only; prints split shapes and fraud counts.
-    baseline  classical control: the same logistic readout, fitted on the raw
-              (flattened) windows instead of the reservoir outputs.
+    baseline  logistic regression fitted on the raw (flattened) feature windows instead of the reservoir outputs.
+    lstm      recurrent neural-network baseline fitted on the feature windows.
     qrc       run the quantum reservoir, then fit the logistic readout.
 
-The readout is fitted on train only. Validation and test metrics are both
-reported; nothing is tuned on validation. Each baseline/qrc run is saved to
+Models are fitted on train only. Validation loss selects the LSTM checkpoint;
+validation and test metrics are reported. Each run is saved to
 ``{output_dir}/{timestamp}_{command}/`` and summarised in ``{output_dir}/summary.csv``.
 
 Examples:
     python -m experiments.cli prepare --size small --save-data data/sim_small
     python -m experiments.cli baseline --size medium
+    python -m experiments.cli lstm --size medium
     python -m experiments.cli qrc --size medium --backend estimator-exact
     python -m experiments.cli qrc --data load --data-dir data --backend gaussian --precision 0.05
 """
+
 import argparse
 import csv
 import json
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -43,7 +46,7 @@ from qrc.backends.statevector import StatevectorBackend
 from qrc.datasets import load_split_files, split_dataset
 from qrc.datasets.create_dataset import add_frauds, generate_dataset
 from qrc.datasets.split_dataset import main as split_and_save_dataset
-from qrc.encodings import AngleEncoding
+from qrc.encodings import AngleEncoding, ReuploadingEncoding, DenseAngleEncoding
 from qrc.features import FeatureEngineer
 from qrc.logger import get_logger
 from qrc.observables import build_observables
@@ -52,6 +55,7 @@ from qrc.protocol import QRCProtocol
 from qrc.readout import ClassicalReadout
 from qrc.reservoirs import RandomCircuitReservoir
 from qrc.sequences import SPLITS, window_by_customer_id
+from experiments.lstm_baseline import run_lstm_baseline
 
 logger = get_logger(__name__)
 
@@ -92,10 +96,21 @@ SIZES = {
 SIMULATION = dict(nb_days=365, start_date="2025-01-01", r=5)
 
 BACKEND_NAMES = ("statevector", "estimator-exact", "gaussian", "shots")
-METRIC_NAMES = ("pr_auc", "roc_auc", "f1_score", "precision", "recall")
+METRIC_NAMES = ("pr_auc", "roc_auc", "f1_score", "precision", "recall", "matthews_corr_coef", "balanced_accuracy")
+EVAL_SPLITS = ("validation", "test")
 SUMMARY_FIELDS = (
-    "run", "command", "data", "size", "data_seed", "data_dir", "feature_set", "window_length", "alpha", "backend",
-    "validation_pr_auc", "validation_f1_score", "test_pr_auc", "test_f1_score",
+    # run and data
+    "run", "commit", "command", "data", "size", "data_seed", "data_dir", "start_date", "end_date",
+    "feature_set", "n_features", "window_length",
+    *(f"{split}_{k}" for split in SPLITS for k in ("samples", "frauds")),
+    # reservoir (qrc only)
+    "backend", "backend_precision", "encoding_layers", "encoding_scaling", "n_input_qubits", "n_mem_qubits", "n_qubits", "depth", "entangler",
+    "reset_inputs", "observables", "n_observables", "seed", "reservoir_seconds",
+    # lstm only
+    "training_seconds",
+    # readout and metrics
+    "alpha", "threshold",
+    *(f"{split}_{m}" for split in EVAL_SPLITS for m in METRIC_NAMES),
 )
 
 
@@ -109,7 +124,9 @@ def load_transactions(args):
         splits = load_split_files(data_dir, args.start_date, args.end_date)
         return tuple(splits[split] for split in SPLITS)
 
-    simulation = dict(SIZES[args.size], **SIMULATION, default_random_state=args.data_seed)
+    simulation = dict(
+        SIZES[args.size], **SIMULATION, default_random_state=args.data_seed
+    )
     customer_profiles, terminal_profiles, transactions = generate_dataset(**simulation)
     transactions = add_frauds(customer_profiles, terminal_profiles, transactions)
     if args.save_data:
@@ -129,17 +146,26 @@ def prepare_data(args):
     train, validation, test = load_transactions(args)
 
     full_data = pd.concat([train, validation, test], ignore_index=True)
-    full_data = full_data.drop(columns=["TX_FRAUD_SCENARIO"], errors="ignore")  # avoid data leakage
+    full_data = full_data.drop(
+        columns=["TX_FRAUD_SCENARIO"], errors="ignore"
+    )  # avoid data leakage
 
     feature_engineer = FeatureEngineer(windows=FEATURE_WINDOWS, save=False)
-    train_features, validation_features, test_features = feature_engineer.run(full_data, train, validation, test)
+    train_features, validation_features, test_features = feature_engineer.run(
+        full_data, train, validation, test
+    )
 
     processor = DataProcessor(feature_sets=FEATURE_SETS)
-    input_data = processor.process(train_features, validation_features, test_features, feature_set=args.feature_set)
+    input_data = processor.process(
+        train_features, validation_features, test_features, feature_set=args.feature_set
+    )
 
     data = window_by_customer_id(input_data, args.window_length)
     data["summary"] = {
-        split: {"samples": len(data[f"y_{split}"]), "frauds": int(data[f"y_{split}"].sum())}
+        split: {
+            "samples": len(data[f"y_{split}"]),
+            "frauds": int(data[f"y_{split}"].sum()),
+        }
         for split in SPLITS
     }
     return data
@@ -153,34 +179,75 @@ def print_data_summary(data):
 
 # --------------------------------------------------------------------------- models
 
-def make_backend(name, precision, seed):
+def make_backend(name, precision, seed, reset_inputs=False):
     if name == "statevector":
+        if reset_inputs:
+            raise ValueError(
+                "--reset-inputs needs an Estimator backend, not statevector"
+            )
         return StatevectorBackend()
     if name == "estimator-exact":
-        return EstimatorBackend()
-    return EstimatorBackend(precision=precision, seed=seed, sampling=name)
+        return EstimatorBackend(reset_inputs=reset_inputs)
+    return EstimatorBackend(
+        precision=precision, seed=seed, sampling=name, reset_inputs=reset_inputs
+    )
 
 
 def baseline_features(data):
     """Raw windows, flattened ``(n, L, F) → (n, L·F)``: what the readout sees without a reservoir."""
-    return {split: data[f"X_{split}"].reshape(len(data[f"X_{split}"]), -1) for split in SPLITS}
+    return {
+        split: data[f"X_{split}"].reshape(len(data[f"X_{split}"]), -1)
+        for split in SPLITS
+    }
 
 
 def qrc_features(data, args):
-    """Run the reservoir once over each split."""
+    """Run the reservoir once over each split.
+
+    Returns:
+        tuple: the reservoir outputs per split, and the resolved reservoir settings
+        (qubit counts after defaults, number of observables) for the run record.
+    """
     n_input_qubits = args.n_input_qubits or len(FEATURE_SETS[args.feature_set])
-    encoder = AngleEncoding(num_qubits=n_input_qubits)
-    reservoir = RandomCircuitReservoir(num_input_qubits=n_input_qubits, num_mem_qubits=args.n_mem_qubits,
-                                       depth=args.depth, entangler=args.entangler, rng=args.seed)
+    if args.encoding_layers == 1:
+        # if we have more features than qubits, we use dense angle else regular
+        if n_input_qubits < len(FEATURE_SETS[args.feature_set]):
+            encoder = DenseAngleEncoding(
+                num_qubits=n_input_qubits, scaling=args.encoding_scaling
+            )
+        else:
+            encoder = AngleEncoding(
+                num_qubits=n_input_qubits, scaling=args.encoding_scaling
+            )
+    else:
+        encoder = ReuploadingEncoding(
+            num_qubits=n_input_qubits,
+            num_layers=args.encoding_layers,
+            scaling=args.encoding_scaling,
+            rng=(args.seed, 1),
+        )
+    encoder.input_width(len(FEATURE_SETS[args.feature_set]))
+    reservoir = RandomCircuitReservoir(
+        num_input_qubits=n_input_qubits,
+        num_mem_qubits=args.n_mem_qubits,
+        depth=args.depth,
+        entangler=args.entangler,
+        rng=args.seed,
+    )
     observables = build_observables(args.observables, reservoir.num_qubits)
-    backend = make_backend(args.backend, args.precision, args.seed)
+    backend = make_backend(args.backend, args.precision, args.seed, args.reset_inputs)
     protocol = QRCProtocol(encoder, reservoir, observables, backend)
 
     features = {}
     for split in SPLITS:
         print(f"running {args.backend} on {split} ...", flush=True)
         features[split] = protocol.run(data[f"X_{split}"])
-    return features
+    reservoir_info = {
+        "n_input_qubits": n_input_qubits,
+        "n_qubits": reservoir.num_qubits,
+        "n_observables": len(observables),
+    }
+    return features, reservoir_info
 
 
 def fit_and_evaluate(features, data, alpha):
@@ -190,7 +257,9 @@ def fit_and_evaluate(features, data, alpha):
 
     metrics, scores = {}, {}
     for split in ("validation", "test"):
-        split_metrics, _, _, split_scores = readout.evaluate(features[split], data[f"y_{split}"])
+        split_metrics, _, _, split_scores = readout.evaluate(
+            features[split], data[f"y_{split}"]
+        )
         metrics[split] = {k: float(v) for k, v in split_metrics.items()}
         scores[split] = split_scores
     return metrics, scores
@@ -200,22 +269,97 @@ def fit_and_evaluate(features, data, alpha):
 
 def data_source(args):
     if args.data == "load":
-        return {"data": "load", "data_dir": str(args.data_dir),
-                "start_date": args.start_date, "end_date": args.end_date}
-    return {"data": "simulate", "size": args.size, "data_seed": args.data_seed,
-            **SIZES[args.size], **SIMULATION}
+        return {
+            "data": "load",
+            "data_dir": str(args.data_dir),
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+        }
+    return {
+        "data": "simulate",
+        "size": args.size,
+        "data_seed": args.data_seed,
+        **SIZES[args.size],
+        **SIMULATION,
+    }
 
 
-def save_run(args, data, metrics, scores, extra):
+def git_commit():
+    """Short hash of the checked-out commit, with ``-dirty`` if there are uncommitted changes; ``""`` outside git."""
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=PROJECT_ROOT,
+                                capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=PROJECT_ROOT,
+                               capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    return f"{commit}-dirty" if dirty else commit
+
+
+def summary_row(args, data, metrics, reservoir_info, extra, run_name):
+    """One summary.csv row: everything needed to identify, reproduce and compare the run."""
+    row = {
+        "run": run_name,
+        "commit": git_commit(),
+        "command": args.command,
+        # start/end date only when loading: for a simulation, start_date is the simulator's, not a filter
+        **{k: v for k, v in data_source(args).items()
+           if k in (("data", "data_dir", "start_date", "end_date") if args.data == "load"
+                    else ("data", "size", "data_seed"))},
+        "feature_set": args.feature_set,
+        "n_features": len(FEATURE_SETS[args.feature_set]),
+        "window_length": args.window_length,
+        **{f"{split}_{k}": data["summary"][split][k] for split in SPLITS for k in ("samples", "frauds")},
+        "alpha": getattr(args, "alpha", ""),  # lstm has no logistic readout
+        "threshold": metrics["test"]["threshold_used"],
+        **{f"{split}_{m}": metrics[split][m] for split in EVAL_SPLITS for m in METRIC_NAMES},
+        **extra,
+    }
+    if args.command == "qrc":
+        row.update(
+            backend=args.backend,
+            # only the sampled backends use it
+            backend_precision=(
+                args.precision if args.backend in ("gaussian", "shots") else ""
+            ),
+            encoding_layers=args.encoding_layers,
+            encoding_scaling=args.encoding_scaling,
+            n_mem_qubits=args.n_mem_qubits,
+            depth=args.depth,
+            entangler=args.entangler,
+            reset_inputs=args.reset_inputs,
+            observables=args.observables,
+            seed=args.seed,
+            **reservoir_info,
+        )
+    elif args.command == "lstm":
+        row.update(seed=args.seed)
+    return row
+
+
+def append_summary(summary_path, row):
+    """Append `row` to summary.csv, writing the header if the file is new."""
+    write_header = not summary_path.exists()
+    with open(summary_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, restval="")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def save_run(args, data, metrics, scores, extra, reservoir_info=None):
     """Write config, metrics and scores to a fresh run directory and append to summary.csv."""
     output_dir = Path(args.output_dir)
     run_dir = output_dir / f"{datetime.now():%Y%m%d_%H%M%S_%f}_{args.command}"
     run_dir.mkdir(parents=True)
 
+    row = summary_row(args, data, metrics, reservoir_info or {}, extra, run_dir.name)
     config = {
         "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+        "commit": row["commit"],
         "data_source": data_source(args),
         "features": FEATURE_SETS[args.feature_set],
+        "reservoir": reservoir_info or {},
         "splits": data["summary"],
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2))
@@ -224,28 +368,17 @@ def save_run(args, data, metrics, scores, extra):
              **{f"y_{split}": data[f"y_{split}"] for split in scores},
              **{f"scores_{split}": s for split, s in scores.items()})
 
-    row = {
-        "run": run_dir.name,
-        "command": args.command,
-        **{k: v for k, v in data_source(args).items() if k in ("data", "size", "data_seed", "data_dir")},
-        "feature_set": args.feature_set,
-        "window_length": args.window_length,
-        "alpha": args.alpha,
-        "backend": getattr(args, "backend", ""),
-        **{f"{split}_{m}": metrics[split][m] for split in ("validation", "test") for m in ("pr_auc", "f1_score")},
-    }
-    summary_path = output_dir / "summary.csv"
-    write_header = not summary_path.exists()
-    with open(summary_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, restval="")
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
+    append_summary(output_dir / "summary.csv", row)
     return run_dir
 
 
 def print_metrics(metrics):
-    table = pd.DataFrame({split: {m: metrics[split][m] for m in METRIC_NAMES} for split in ("validation", "test")}).T
+    table = pd.DataFrame(
+        {
+            split: {m: metrics[split][m] for m in METRIC_NAMES}
+            for split in ("validation", "test")
+        }
+    ).T
     print()
     print(table.to_string(float_format=lambda v: f"{v:.4f}"))
 
@@ -255,40 +388,94 @@ def print_metrics(metrics):
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
     data = common.add_argument_group("data")
-    data.add_argument("--data", choices=("simulate", "load"), default="simulate",
-                      help="simulate a dataset, or load the split .pkl files from --data-dir")
-    data.add_argument("--size", choices=tuple(SIZES), default="medium", help="simulation preset")
+    data.add_argument(
+        "--data",
+        choices=("simulate", "load"),
+        default="simulate",
+        help="simulate a dataset, or load the split .pkl files from --data-dir",
+    )
+    data.add_argument(
+        "--size", choices=tuple(SIZES), default="medium", help="simulation preset"
+    )
     data.add_argument("--data-seed", type=int, default=0, help="simulation seed")
-    data.add_argument("--save-data", type=Path, default=None,
-                      help="also write the simulated splits here (reload with --data load --data-dir)")
-    data.add_argument("--data-dir", type=Path, default=PROJECT_ROOT / "data",
-                      help="directory holding transactions_{train,validation,test}.pkl")
-    data.add_argument("--start-date", default=None, help="first day to load, YYYY-MM-DD (--data load)")
-    data.add_argument("--end-date", default=None, help="last day to load, YYYY-MM-DD (--data load)")
-    data.add_argument("--feature-set", type=int, choices=tuple(FEATURE_SETS), default=7,
-                      help="selected features: 7, 10 or 15 (each extends the previous)")
-    data.add_argument("--window-length", type=int, default=3, help="transactions per customer window")
+    data.add_argument(
+        "--save-data",
+        type=Path,
+        default=None,
+        help="also write the simulated splits here (reload with --data load --data-dir)",
+    )
+    data.add_argument(
+        "--data-dir",
+        type=Path,
+        default=PROJECT_ROOT / "data",
+        help="directory holding transactions_{train,validation,test}.pkl",
+    )
+    data.add_argument(
+        "--start-date", default=None, help="first day to load, YYYY-MM-DD (--data load)"
+    )
+    data.add_argument(
+        "--end-date", default=None, help="last day to load, YYYY-MM-DD (--data load)"
+    )
+    data.add_argument(
+        "--feature-set",
+        type=int,
+        choices=tuple(FEATURE_SETS),
+        default=7,
+        help="selected features: 7, 10 or 15 (each extends the previous)",
+    )
+    data.add_argument(
+        "--window-length", type=int, default=3, help="transactions per customer window"
+    )
 
     run = argparse.ArgumentParser(add_help=False)
-    run.add_argument("--alpha", type=float, default=1.0, help="readout regularization (C = 1/alpha)")
     run.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "results" / "runs")
+
+    readout = argparse.ArgumentParser(add_help=False)
+    readout.add_argument("--alpha", type=float, default=1.0, help="readout regularization (C = 1/alpha)")
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare", parents=[common], help="data preparation only")
-    commands.add_parser("baseline", parents=[common, run], help="logistic readout on the raw windows")
+    commands.add_parser(
+        "baseline",
+        parents=[common, run, readout],
+        help="logistic regression on the raw (flattened) feature windows",
+    )
 
-    qrc_parser = commands.add_parser("qrc", parents=[common, run], help="quantum reservoir + logistic readout")
+    lstm_parser = commands.add_parser(
+        "lstm", parents=[common, run], help="LSTM classifier on transaction windows"
+    )
+    lstm_parser.add_argument("--hidden-size", type=int, default=32)
+    lstm_parser.add_argument("--epochs", type=int, default=50)
+    lstm_parser.add_argument("--batch-size", type=int, default=256)
+    lstm_parser.add_argument("--learning-rate", type=float, default=1e-3)
+    lstm_parser.add_argument("--patience", type=int, default=8)
+    lstm_parser.add_argument("--seed", type=int, default=42)
+
+    qrc_parser = commands.add_parser(
+        "qrc", parents=[common, run, readout], help="quantum reservoir + logistic readout"
+    )
     qrc_parser.add_argument("--backend", choices=BACKEND_NAMES, default="estimator-exact")
     qrc_parser.add_argument("--precision", type=float, default=0.05,
                             help="target std. error of each expectation value (gaussian/shots; shots ~ 1/precision**2)")
     qrc_parser.add_argument("--n-input-qubits", type=int, default=None,
                             help="defaults to the number of features in --feature-set")
+    qrc_parser.add_argument("--encoding-layers", type=int, default=1,
+                            help="times each transaction is encoded (data re-uploading); 1 is plain angle encoding")
+    qrc_parser.add_argument("--encoding-scaling", type=float, default=np.pi,
+                            help="angle per unit of (scaled) feature, in each encoding layer")
     qrc_parser.add_argument("--n-mem-qubits", type=int, default=2)
     qrc_parser.add_argument("--depth", type=int, default=2)
     qrc_parser.add_argument("--entangler", choices=("cx", "cry"), default="cx")
+    qrc_parser.add_argument(
+        "--reset-inputs",
+        action="store_true",
+        help="reset the input qubits before each encoding step (density-matrix simulation)",
+    )
     qrc_parser.add_argument("--observables", default="Z")
-    qrc_parser.add_argument("--seed", type=int, default=42, help="reservoir and sampling seed")
+    qrc_parser.add_argument(
+        "--seed", type=int, default=42, help="reservoir and sampling seed"
+    )
     return parser
 
 
@@ -300,16 +487,32 @@ def main(argv=None):
     if args.command == "prepare":
         return None
 
-    extra = {}
+    extra, reservoir_info = {}, None
     if args.command == "baseline":
         features = baseline_features(data)
+        metrics, scores = fit_and_evaluate(features, data, args.alpha)
+    elif args.command == "lstm":
+        splits = {
+            split: (data[f"X_{split}"], data[f"y_{split}"])
+            for split in SPLITS
+        }
+        result = run_lstm_baseline(
+            splits,
+            seed=args.seed,
+            hidden_size=args.hidden_size,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            patience=args.patience,
+        )
+        metrics, scores = result["metrics"], result["scores"]
+        extra["training_seconds"] = result["seconds"]
     else:
         start = time.perf_counter()
-        features = qrc_features(data, args)
+        features, reservoir_info = qrc_features(data, args)
         extra["reservoir_seconds"] = time.perf_counter() - start
-
-    metrics, scores = fit_and_evaluate(features, data, args.alpha)
-    run_dir = save_run(args, data, metrics, scores, extra)
+        metrics, scores = fit_and_evaluate(features, data, args.alpha)
+    run_dir = save_run(args, data, metrics, scores, extra, reservoir_info)
     print_metrics(metrics)
     print(f"\nResults saved to {run_dir}")
     return run_dir

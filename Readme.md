@@ -36,6 +36,12 @@ On a laptop, the `small` preset takes a few seconds for `baseline` and about 10�
 > `pip install -e .` installs the `qrc` package in editable mode, so changes you make under
 > `qrc/` take effect immediately without reinstalling.
 
+The optional LSTM baseline also needs PyTorch:
+
+```bash
+pip install -e ".[classical]"
+```
+
 ---
 
 ## Running experiments
@@ -50,16 +56,18 @@ python -m experiments.cli <command> [options]
 |------------|-----------------------------------------------------------------------------------------------|
 | `prepare`  | Data preparation only. Prints the split shapes and fraud counts.                             |
 | `baseline` | Classical control: the logistic readout fitted directly on the raw (flattened) windows.       |
+| `lstm`     | Classical control: an LSTM trained on the windows; validation loss picks the best epoch (needs PyTorch). |
 | `qrc`      | Runs the quantum reservoir on each window, then fits the same logistic readout on its outputs. |
 
-All three commands run the same data preparation:
+All commands run the same data preparation:
 
 ```
 data (simulated or loaded) → feature engineering → DataProcessor → per-customer windows
 ```
 
-The readout is fitted on **train only**. PR-AUC, ROC-AUC, F1, precision and recall are reported
-on **validation and test**. Nothing is tuned on validation.
+Models are fitted on **train only**. PR-AUC, ROC-AUC, F1, precision, recall, Matthews correlation
+coefficient (MCC) and balanced accuracy are reported on **validation and test**. Nothing is tuned on
+validation, except that the `lstm` command uses validation loss for early stopping.
 
 Run `python -m experiments.cli <command> --help` to list every option.
 
@@ -68,6 +76,9 @@ Run `python -m experiments.cli <command> --help` to list every option.
 ```bash
 # Classical baseline on a mid-sized simulated dataset
 python -m experiments.cli baseline --size medium
+
+# LSTM baseline on a small-sized simulated dataset
+python -m experiments.cli lstm --size small --epochs 10
 
 # QRC with the exact Qiskit Estimator
 python -m experiments.cli qrc --size medium --backend estimator-exact
@@ -97,12 +108,23 @@ python -m experiments.cli qrc --data load --backend gaussian --precision 0.05
 | `--feature-set 7\|10\|15`     | `7`        | Features selected by the feature analysis. Each set extends the previous one ([list](docs/data_pipeline.md#4-feature-analysis-and-the-feature-sets)) |
 | `--window-length`             | `3`        | Number of transactions per customer window                                   |
 
-**Readout and output**, for `baseline` and `qrc`:
+**Readout and output**, for `baseline` and `qrc` (`--output-dir` also applies to `lstm`):
 
 | Option         | Default        | Meaning                                    |
 |----------------|----------------|--------------------------------------------|
 | `--alpha`      | `1.0`          | Readout regularisation (`C = 1/alpha`)     |
 | `--output-dir` | `results/runs` | Where runs are saved                       |
+
+**LSTM**, for `lstm` only:
+
+| Option            | Default | Meaning                                         |
+|-------------------|---------|-------------------------------------------------|
+| `--hidden-size`   | `32`    | LSTM hidden units                               |
+| `--epochs`        | `50`    | Maximum training epochs                         |
+| `--batch-size`    | `256`   | Training batch size                             |
+| `--learning-rate` | `1e-3`  | Adam learning rate                              |
+| `--patience`      | `8`     | Epochs without validation-loss improvement before stopping |
+| `--seed`          | `42`    | Training seed                                   |
 
 **Reservoir and backend**, for `qrc` only:
 
@@ -110,10 +132,13 @@ python -m experiments.cli qrc --data load --backend gaussian --precision 0.05
 |--------------------|-----------------|-------------------------------------------------------------------------|
 | `--backend`        | `estimator-exact` | `estimator-exact`, `statevector`, `gaussian` or `shots` (see below)   |
 | `--precision`      | `0.05`          | Target standard error per expectation value (`gaussian` / `shots`)      |
-| `--n-input-qubits` | number of features | Input qubits                                                         |
+| `--n-input-qubits` | number of features | Input qubits. With fewer qubits than features, dense angle encoding is used (see below) |
 | `--n-mem-qubits`   | `2`             | Memory qubits                                                           |
 | `--depth`          | `2`             | Reservoir circuit depth                                                 |
 | `--entangler`      | `cx`            | `cx` or `cry`                                                           |
+| `--encoding-layers`  | `1`           | Times each transaction is encoded (data re-uploading). `1` is plain angle encoding |
+| `--encoding-scaling` | `π`           | Rotation angle per unit of (scaled) feature, in each encoding layer     |
+| `--reset-inputs`   | off             | Reset the input qubits before each transaction is encoded. Needs an Estimator backend (density-matrix simulation, slower) |
 | `--observables`    | `Z`             | E.g. `Z`, `Z+ZZ`, `XX-all`, `XYZ` (see `build_observables` in `qrc/observables.py`) |
 | `--seed`           | `42`            | Reservoir and sampling seed                                             |
 
@@ -124,16 +149,36 @@ The backends:
 - `gaussian`: exact expectation values plus Gaussian noise of width `--precision`. This is a cheap stand-in for shot noise.
 - `shots`: real shot sampling with about `1/precision²` shots.
 
+The encodings:
+
+- **Angle encoding** (default): one feature per input qubit, as a `RY` rotation of `scaling × feature`.
+- **Dense angle encoding**: used automatically when `--n-input-qubits` is smaller than the number of
+  features (with `--encoding-layers 1`). Each qubit carries up to two features: one as a `RY`
+  rotation, one as a `RZ` rotation. So the number of features can be at most twice `--n-input-qubits`.
+- **Re-uploading** (`--encoding-layers` > 1): the transaction is angle-encoded several times, with
+  fixed random `RZ` rotations in between. Each feature then enters with frequencies up to
+  `layers × scaling`.
+
 ### Results
 
-Each `baseline` and `qrc` run creates a directory `results/runs/<timestamp>_<command>/` containing:
+Each `baseline`, `lstm` and `qrc` run creates a directory `results/runs/<timestamp>_<command>/` containing:
 
 - `config.json`: every argument, the data source, the features used and the split sizes
-- `metrics.json`: validation and test metrics, plus the reservoir runtime for `qrc`
+- `metrics.json`: validation and test metrics, plus the reservoir runtime for `qrc` or the training time for `lstm`
 - `scores.npz`: labels and predicted scores per split, for plotting PR/ROC curves later
 
 Each run also appends one row to **`results/runs/summary.csv`**, so you can compare runs side
-by side. `results/` is git-ignored.
+by side. A row records:
+
+- the run: its name, the git commit (with `-dirty` if there were uncommitted changes) and the command;
+- the data: its source, feature set, window length, and the size and fraud count of each split;
+- for `qrc`, the reservoir: backend, precision, encoding layers and scaling, qubit counts, depth,
+  entangler, input reset, observables and seed, plus the reservoir runtime;
+- for `lstm`, the training seed and training time;
+- the readout: `alpha` (empty for `lstm`), the decision threshold, and every metric (PR-AUC, ROC-AUC,
+  F1, precision, recall, MCC, balanced accuracy) on validation and test.
+
+`results/` is git-ignored.
 
 ### Reproducibility
 
@@ -226,7 +271,8 @@ cc_fraud_detection_using_QRC/
 │   ├── features/            # fraud feature engineering
 │   ├── analysis/            # exploration, feature scoring and selection, plots
 │   ├── benchmarks/          # synthetic tasks: memory, parity, NARMA10
-│   ├── backends/            # statevector, Qiskit Aer Estimator, spin-pulse, (to come) density matrix
+│   ├── backends/            # statevector, Qiskit Aer Estimator, spin-pulse
+│   ├── baselines/           # classical baseline models (LSTM)
 │   ├── processing.py        # final model input: feature selection, imputation, scaling
 │   ├── sequences.py         # 2D features → (n, window_length, features) per-customer windows
 │   ├── encodings.py         # input encodings (AngleEncoding, ...)
