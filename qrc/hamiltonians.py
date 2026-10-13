@@ -18,7 +18,7 @@ class HamiltonianTopology(str, Enum):
 
     LINEAR = "linear"
     RING = "ring"
-    FULLY_CONNECTED = "fully_connected"
+    FULLY_CONNECTED = "fully-connected"
 
 
 def _interaction_pairs(num_qubits, topology):
