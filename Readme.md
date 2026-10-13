@@ -83,9 +83,6 @@ python -m experiments.cli lstm --size small --epochs 10
 # QRC with the exact Qiskit Estimator
 python -m experiments.cli qrc --size medium --backend estimator-exact
 
-# QRC with a ring-topology TFIM Hamiltonian reservoir
-python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
-
 # QRC with shot noise (~1/precision² shots per expectation value)
 python -m experiments.cli qrc --size medium --backend shots --precision 0.05
 
@@ -96,8 +93,9 @@ python -m experiments.cli qrc --feature-set 10 --n-mem-qubits 3 --depth 3 --obse
 python -m experiments.cli qrc --data load --backend gaussian --precision 0.05
 
 # Run with specific topology and hamiltonian
-python3 -m experiments.cli qrc --size small --n-input-qubits 4 --n-mem-qubits 3 --hamiltonian native-exchange --topology fully-connected
-python3 -m experiments.cli qrc --size small --n-input-qubits 6 --n-mem-qubits 3 --hamiltonian tfim --topology ring
+python -m experiments.cli qrc --size small --n-input-qubits 4 --n-mem-qubits 3 --hamiltonian native-exchange --topology fully-connected
+python -m experiments.cli qrc --size small --n-input-qubits 6 --n-mem-qubits 3 --hamiltonian tfim --topology ring
+python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
 ```
 
 ### Options
