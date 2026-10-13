@@ -90,6 +90,14 @@ def test_dense_encoding_rejects_input_outside_supported_range(values):
         DenseAngleEncoding(2).encode(values)
 
 
+@pytest.mark.parametrize("encoder", [AngleEncoding(N_IN), ReuploadingEncoding(N_IN, num_layers=2, rng=0)])
+def test_one_feature_per_qubit_encodings_tile_but_never_drop_features(encoder):
+    assert encoder.input_width(1) == N_IN
+    assert encoder.input_width(N_IN) == N_IN
+    with pytest.raises(ValueError):
+        encoder.input_width(N_IN + 1)
+
+
 def test_dense_encoding_rejects_identical_axes():
     with pytest.raises(ValueError):
         DenseAngleEncoding(2, axis1="y", axis2="y")

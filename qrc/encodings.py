@@ -9,9 +9,15 @@ class Encoding:
         self.num_qubits = num_qubits
 
     def input_width(self, num_features: int) -> int:
-        """Return the number of values this encoding consumes per input step."""
+        """Return the number of values this encoding consumes per input step.
+        Backends repeat the features cyclically to fill extra qubits; having more features than qubits is an error."""
         if num_features < 1:
             raise ValueError("Encoding requires at least one input feature.")
+        if num_features > self.num_qubits:
+            raise ValueError(
+                f"{type(self).__name__} encodes at most {self.num_qubits} features "
+                f"(one per qubit), got {num_features}."
+            )
         return self.num_qubits
 
 
@@ -199,14 +205,7 @@ class DenseAngleEncoding(Encoding):
             encoding circuit to be prepended to qrc
         """
 
-        if len(input) <= self.num_qubits:
-            raise ValueError(
-                f"Input length {len(input)} must be greater than number of qubits {self.num_qubits}."
-            )
-        if len(input) > 2 * self.num_qubits:
-            raise ValueError(
-                f"Input length {len(input)} must be at most {2 * self.num_qubits}."
-            )
+        self.input_width(len(input))
 
         qc = QuantumCircuit(self.num_qubits)
         for i in range(self.num_qubits):
