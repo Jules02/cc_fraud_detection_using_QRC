@@ -110,7 +110,7 @@ python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
 | `--save-data DIR`             | –          | Also write the simulated splits to `DIR` (reload with `--data load --data-dir DIR`)                                                                  |
 | `--data-dir DIR`              | `data/`    | Where `--data load` reads `transactions_{train,validation,test}.pkl`                                                                                 |
 | `--start-date`, `--end-date`  | –          | Restrict the loaded period (`YYYY-MM-DD`)                                                                                                            |
-| `--feature-set 7\|10\|15`     | `7`        | Features selected by the feature analysis. Each set extends the previous one ([list](docs/data_pipeline.md#4-feature-analysis-and-the-feature-sets)) |
+| `--feature-set 1\|7\|10\|15`   | `7`        | `1`: the raw log amount only. `7`, `10`, `15`: selected by the feature analysis, each extends the previous ([list](docs/data_pipeline.md#4-feature-analysis-and-the-feature-sets)) |
 | `--window-length`             | `3`        | Number of transactions per customer window                                                                                                           |
 
 **Readout and output**, for `baseline` and `qrc` (`--output-dir` also applies to `lstm`):

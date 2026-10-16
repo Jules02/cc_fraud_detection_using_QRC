@@ -257,3 +257,14 @@ def test_qrc_cli_keeps_random_reservoir_as_default(monkeypatch):
     assert isinstance(captured[0], RandomCircuitReservoir)
     assert reservoir_info["hamiltonian"] == "random"
     assert reservoir_info["topology"] == ""
+
+
+def test_cli_runs_on_raw_amount_windows(tmp_path):
+    """Arm B's input: the raw log amount only, no engineered history."""
+    run_dir = main(["baseline", "--size", "small", "--feature-set", "1", "--window-length", "4",
+                    "--output-dir", str(tmp_path)])
+
+    with open(tmp_path / "summary.csv", newline="") as f:
+        (row,) = csv.DictReader(f)
+    assert row["run"] == run_dir.name
+    assert (row["feature_set"], row["n_features"]) == ("1", "1")

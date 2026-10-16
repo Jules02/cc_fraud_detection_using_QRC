@@ -71,6 +71,9 @@ logger = get_logger(__name__)
 
 PROJECT_ROOT = Path(qrc.__file__).resolve().parents[1]
 
+# Raw per-transaction input, no customer or terminal history: any memory must come from the window
+# (arm B, see docs/experiments.md).
+_SET_1 = ["TX_AMOUNT_LOG"]
 # Feature sets from the feature analysis (on train only). Each set extends the previous one.
 _SET_7 = [
     "TERMINAL_RISK_7D",
@@ -93,7 +96,7 @@ _SET_15 = _SET_10 + [
     "CUSTOMER_TIME_GAP_SECONDS",
     "TX_DURING_WEEKEND",
 ]
-FEATURE_SETS = {7: _SET_7, 10: _SET_10, 15: _SET_15}
+FEATURE_SETS = {1: _SET_1, 7: _SET_7, 10: _SET_10, 15: _SET_15}
 FEATURE_WINDOWS = (1, 7, 30, 90, 180)
 # TRAIN_RATIO, VALIDATION_RATIO = 0.70, 0.15
 
@@ -508,7 +511,7 @@ def build_parser():
         type=int,
         choices=tuple(FEATURE_SETS),
         default=7,
-        help="selected features: 7, 10 or 15 (each extends the previous)",
+        help="selected features: 1 (raw log amount) or 7, 10, 15 (engineered, each extends the previous)",
     )
     data.add_argument(
         "--window-length", type=int, default=3, help="transactions per customer window"
