@@ -9,6 +9,7 @@ import pytest
 import experiments.cli as cli
 from experiments.cli import main
 from qrc.encodings import DenseAngleEncoding
+from qrc.reservoirs import HamiltonianReservoir, RandomCircuitReservoir
 
 
 def _metrics(run_dir):
@@ -34,11 +35,17 @@ def test_run_saves_results(tmp_path, command):
         "scores.npz",
     }
     for split in ("validation", "test"):
-        assert 0.0 <= _metrics(run_dir)[split]["pr_auc"] <= 1.0
+        assert 0.0 <= _metrics(run_dir)[split]["average_precision"] <= 1.0
+        assert "average_precision_customer" in _metrics(run_dir)[split]
+
+    saved = np.load(run_dir / "scores.npz")
+    assert np.array_equal(saved["category_test"] != "legit", saved["y_test"] == 1)
+    assert len(saved["ids_test"]) == len(saved["scores_test"])
 
     with open(tmp_path / "summary.csv", newline="") as f:
         rows = list(csv.DictReader(f))
     assert [row["run"] for row in rows] == [run_dir.name]
+    assert sum(int(rows[0][f"test_frauds_{c}"]) for c in ("amount", "terminal", "customer")) == int(rows[0]["test_frauds"])
 
 
 def test_saved_simulation_reloads_identically(tmp_path):
@@ -105,6 +112,8 @@ def test_summary_records_reservoir_and_metrics(tmp_path):
         "42",
     )
     assert row["backend_precision"] == ""  # unused by the exact backend
+    assert row["hamiltonian"] == "random"
+    assert row["topology"] == ""
     for split in ("validation", "test"):
         for metric in cli.METRIC_NAMES:
             assert row[f"{split}_{metric}"] != ""
@@ -156,7 +165,7 @@ def test_qrc_cli_runs_with_dense_encoding(tmp_path):
 
     config = json.loads((run_dir / "config.json").read_text())
     assert config["reservoir"]["n_input_qubits"] == 6
-    assert 0.0 <= _metrics(run_dir)["test"]["pr_auc"] <= 1.0
+    assert 0.0 <= _metrics(run_dir)["test"]["average_precision"] <= 1.0
 
 
 def test_qrc_cli_runs_with_fewer_input_qubits(tmp_path):
@@ -183,7 +192,71 @@ def test_qrc_cli_runs_with_fewer_input_qubits(tmp_path):
     metrics = _metrics(run_dir)
 
     for split in ("validation", "test"):
-        assert 0.0 <= metrics[split]["pr_auc"] <= 1.0
+        assert 0.0 <= metrics[split]["average_precision"] <= 1.0
+
+
+
+def test_qrc_cli_selects_hamiltonian_and_topology(monkeypatch):
+    args = cli.build_parser().parse_args(
+        [
+            "qrc",
+            "--n-input-qubits",
+            "7",
+            "--n-mem-qubits",
+            "1",
+            "--hamiltonian",
+            "tfim",
+            "--topology",
+            "ring",
+        ]
+    )
+    captured = []
+
+    class RecordingProtocol:
+        def __init__(self, *protocol_args):
+            captured.append(protocol_args[1])
+
+        def run(self, windows):
+            return np.zeros((len(windows), 1))
+
+    monkeypatch.setattr(cli, "QRCProtocol", RecordingProtocol)
+    monkeypatch.setattr(cli, "make_backend", lambda *args: args)
+    data = {
+        f"X_{split}": np.zeros((1, 1, 7)) for split in ("train", "validation", "test")
+    }
+
+    _, reservoir_info = cli.qrc_features(data, args)
+
+    assert len(captured) == 1
+    assert isinstance(captured[0], HamiltonianReservoir)
+    assert captured[0].hamiltonian.num_qubits == 8
+    assert len(captured[0].hamiltonian.params) == 8
+    assert reservoir_info["hamiltonian"] == "tfim"
+    assert reservoir_info["topology"] == "ring"
+
+
+def test_qrc_cli_keeps_random_reservoir_as_default(monkeypatch):
+    args = cli.build_parser().parse_args(["qrc", "--n-input-qubits", "7"])
+    captured = []
+
+    class RecordingProtocol:
+        def __init__(self, *protocol_args):
+            captured.append(protocol_args[1])
+
+        def run(self, windows):
+            return np.zeros((len(windows), 1))
+
+    monkeypatch.setattr(cli, "QRCProtocol", RecordingProtocol)
+    monkeypatch.setattr(cli, "make_backend", lambda *args: args)
+    data = {
+        f"X_{split}": np.zeros((1, 1, 7)) for split in ("train", "validation", "test")
+    }
+
+    _, reservoir_info = cli.qrc_features(data, args)
+
+    assert isinstance(captured[0], RandomCircuitReservoir)
+    assert reservoir_info["hamiltonian"] == "random"
+    assert reservoir_info["topology"] == ""
 
 
 def test_evaluation_cli_arguments_are_exposed():
@@ -215,7 +288,7 @@ def test_fit_and_evaluate_selects_threshold_on_validation(monkeypatch):
             scores = np.full(len(y), self.decision_threshold)
             metrics = {
                 "threshold_used": self.decision_threshold,
-                "pr_auc": 0.5,
+                "average_precision": 0.5,
                 "roc_auc": 0.5,
                 "f1_score": 0.5,
                 "precision": 0.5,
@@ -294,3 +367,4 @@ def test_add_operational_metrics_uses_customer_and_timestamp_metadata(monkeypatc
     assert all(call[-1] == 25 for call in calls)
     assert metrics["validation"]["card_precision_top_k"] == pytest.approx(0.4)
     assert metrics["test"]["card_precision_top_k"] == pytest.approx(0.4)
+

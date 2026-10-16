@@ -18,7 +18,7 @@ class HamiltonianTopology(str, Enum):
 
     LINEAR = "linear"
     RING = "ring"
-    FULLY_CONNECTED = "fully_connected"
+    FULLY_CONNECTED = "fully-connected"
 
 
 def _interaction_pairs(num_qubits, topology):
@@ -60,7 +60,7 @@ class Hamiltonian:
         return f"Hamiltonian({self.name!r}, num_qubits={self.num_qubits}, terms={len(self.ops)})"
 
 
-def tfim(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR):
+def tfim(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR, rng=None):
     """`1.` Textbook transverse-field Ising model.
 
     H = Σ J_i,j X_i X_j  +  ν Σ Z_i
@@ -75,9 +75,10 @@ def tfim(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR):
     """
     pauli_list = []
     params = {}
+    rng = np.random.default_rng(rng)
 
     for i, j in _interaction_pairs(num_qubits, topology):
-        J = np.random.uniform(0, 1) * v
+        J = rng.uniform(0, 1) * v
         pauli_list.append(("XX", [i, j], J))
         params[f"J{i}{j}"] = J
 
@@ -89,7 +90,7 @@ def tfim(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR):
     return Hamiltonian("tfim-textbook", num_qubits, ops, params)
 
 
-def tfim_longitudinal(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR):
+def tfim_longitudinal(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR, rng=None):
     """`2.` Ising model with an added longitudinal field, which breaks
     integrability and makes the dynamics genuinely chaotic.
 
@@ -102,15 +103,16 @@ def tfim_longitudinal(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR):
     """
     pauli_list = []
     params = {}
+    rng = np.random.default_rng(rng)
 
     for i, j in _interaction_pairs(num_qubits, topology):
-        J = np.random.uniform(0, 1) * v
+        J = rng.uniform(0, 1) * v
         pauli_list.append(("XX", [i, j], J))
         params[f"J{i}{j}"] = J
 
     for i in range(num_qubits):
         pauli_list.append(("Z", [i], v))
-        g = np.random.uniform(-1, 1)
+        g = rng.uniform(-1, 1)
         pauli_list.append(("X", [i], g))
         params[f"g{i}"] = g
 
@@ -119,7 +121,7 @@ def tfim_longitudinal(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR):
     return Hamiltonian("tfim-longitudinal", num_qubits, ops, params)
 
 
-def tfim_native(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR):
+def tfim_native(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR, rng=None):
     """`3.` Model `2.` conjugated by Hadamards (X <-> Z), so the coupling term
     lands on SpinPulse's native RZZ. Same spectrum, cheaper circuit.
 
@@ -132,15 +134,16 @@ def tfim_native(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR):
     """
     pauli_list = []
     params = {}
+    rng = np.random.default_rng(rng)
 
     for i, j in _interaction_pairs(num_qubits, topology):
-        J = np.random.uniform(0, 1) * v
+        J = rng.uniform(0, 1) * v
         pauli_list.append(("ZZ", [i, j], J))
         params[f"J{i}{j}"] = J
 
     for i in range(num_qubits):
         pauli_list.append(("Z", [i], v))
-        g = np.random.uniform(-1, 1)
+        g = rng.uniform(-1, 1)
         pauli_list.append(("X", [i], g))
         params[f"g{i}"] = g
 
@@ -149,7 +152,9 @@ def tfim_native(num_qubits, v=1.0, topology=HamiltonianTopology.LINEAR):
     return Hamiltonian("tfim-native", num_qubits, ops, params)
 
 
-def native_exchange(num_qubits, v=1.0, eta=1.0, topology=HamiltonianTopology.LINEAR):
+def native_exchange(
+    num_qubits, v=1.0, eta=1.0, topology=HamiltonianTopology.LINEAR, rng=None
+):
     """`4.` Extension of `3.` with a tunable XY term.
 
     H = Σ J_i,j (Z_i Z_j + η X_i X_j + η Y_i Y_j)  +  ν Σ Z_i  +  Σ g_i X_i
@@ -162,9 +167,10 @@ def native_exchange(num_qubits, v=1.0, eta=1.0, topology=HamiltonianTopology.LIN
     """
     pauli_list = []
     params = {}
+    rng = np.random.default_rng(rng)
 
     for i, j in _interaction_pairs(num_qubits, topology):
-        J = np.random.uniform(0, 1) * v
+        J = rng.uniform(0, 1) * v
         pauli_list.append(("ZZ", [i, j], J))
         params[f"J{i}{j}"] = J
         pauli_list.append(("XX", [i, j], eta * J))
@@ -173,10 +179,10 @@ def native_exchange(num_qubits, v=1.0, eta=1.0, topology=HamiltonianTopology.LIN
 
     for i in range(num_qubits):
         pauli_list.append(("Z", [i], v))
-        g = np.random.uniform(-1, 1)
+        g = rng.uniform(-1, 1)
         pauli_list.append(("X", [i], g))
         params[f"g{i}"] = g
 
     ops = SparsePauliOp.from_sparse_list(pauli_list, num_qubits)
 
-    return Hamiltonian("tfim-native", num_qubits, ops, params)
+    return Hamiltonian("native-exchange", num_qubits, ops, params)

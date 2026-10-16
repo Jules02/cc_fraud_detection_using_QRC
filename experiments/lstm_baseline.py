@@ -141,7 +141,7 @@ def run_lstm_baseline(
             float(np.mean(predictions[negative] == 1)) if np.any(negative) else 0.0
         )
         metrics[split] = {
-            "pr_auc": average_precision_score(labels, split_scores),
+            "average_precision": average_precision_score(labels, split_scores),
             "roc_auc": roc_auc_score(labels, split_scores),
             "f1_score": f1_score(labels, predictions, zero_division=0),
             "precision": precision_score(labels, predictions, zero_division=0),

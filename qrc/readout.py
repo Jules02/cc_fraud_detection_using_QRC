@@ -121,7 +121,7 @@ class ClassicalReadout:
 
         Returns:
             A tuple containing:
-            metrics: Dictionary containing F1 score, precision, recall, ROC-AUC, PR-AUC and the decision threshold used.
+            metrics: Dictionary containing F1 score, precision, recall, ROC-AUC, average precision and the decision threshold used.
             y_labels: The true labels
             y_pred: Binary predictions obtained using decision_threshold
             scores: Predicted probability of fraud for each sequence
@@ -161,7 +161,7 @@ class ClassicalReadout:
                 y_labels,
                 scores,
             ),
-            "pr_auc": average_precision_score(
+            "average_precision": average_precision_score(
                 y_labels,
                 scores,
             ),
