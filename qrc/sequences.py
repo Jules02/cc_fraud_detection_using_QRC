@@ -81,6 +81,17 @@ def window_by_customer_id(input_data, length, splits=SPLITS):
         windowed[f"X_{split}"] = windows[start:stop]
         windowed[f"y_{split}"] = np.asarray(input_data[f"y_{split}"])
         windowed[f"groups_{split}"] = group
+
+        # Preserve row-aligned metadata for downstream evaluation.
+        timestamp_key = f"timestamps_{split}"
+        if timestamp_key in input_data:
+            timestamps = np.asarray(input_data[timestamp_key])
+            if len(timestamps) != size:
+                raise ValueError(
+                    f"{split}: timestamps ({len(timestamps)}) must describe the same rows as X ({size})"
+                )
+            windowed[timestamp_key] = timestamps
+
         windowed[f"has_full_history_{split}"] = has_full_history[start:stop]
         start = stop
 

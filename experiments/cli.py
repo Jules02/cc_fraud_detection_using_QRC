@@ -46,6 +46,7 @@ from qrc.backends.statevector import StatevectorBackend
 from qrc.datasets import load_split_files, split_dataset
 from qrc.datasets.create_dataset import add_frauds, generate_dataset
 from qrc.datasets.split_dataset import main as split_and_save_dataset
+from qrc.decision import card_precision_top_k
 from qrc.encodings import AngleEncoding, ReuploadingEncoding, DenseAngleEncoding
 from qrc.features import FeatureEngineer
 from qrc.logger import get_logger
@@ -96,7 +97,11 @@ SIZES = {
 SIMULATION = dict(nb_days=365, start_date="2025-01-01", r=5)
 
 BACKEND_NAMES = ("statevector", "estimator-exact", "gaussian", "shots")
-METRIC_NAMES = ("pr_auc", "roc_auc", "f1_score", "precision", "recall", "matthews_corr_coef", "balanced_accuracy")
+METRIC_NAMES = (
+    "pr_auc", "roc_auc", "f1_score", "precision", "recall",
+    "false_positive_rate", "matthews_corr_coef", "balanced_accuracy",
+    "card_precision_top_k"
+)
 EVAL_SPLITS = ("validation", "test")
 SUMMARY_FIELDS = (
     # run and data
@@ -109,7 +114,7 @@ SUMMARY_FIELDS = (
     # lstm only
     "training_seconds",
     # readout and metrics
-    "alpha", "threshold",
+    "alpha", "threshold", "min_recall", "top_k",
     *(f"{split}_{m}" for split in EVAL_SPLITS for m in METRIC_NAMES),
 )
 
@@ -250,10 +255,13 @@ def qrc_features(data, args):
     return features, reservoir_info
 
 
-def fit_and_evaluate(features, data, alpha):
+def fit_and_evaluate(features, data, alpha, min_recall):
     """Fit the readout on train, evaluate on validation and test."""
     readout = ClassicalReadout(alpha=alpha)
     readout.fit(features["train"], data["y_train"])
+    readout.select_decision_threshold(
+        features["validation"], data["y_validation"], min_recall=min_recall
+    )
 
     metrics, scores = {}, {}
     for split in ("validation", "test"):
@@ -264,6 +272,16 @@ def fit_and_evaluate(features, data, alpha):
         scores[split] = split_scores
     return metrics, scores
 
+def add_operational_metrics(metrics, scores, data, top_k):
+    """Add daily Card Precision@K to validation and test metrics."""
+    for split in EVAL_SPLITS:
+        metrics[split]["card_precision_top_k"] = card_precision_top_k(
+            data[f"y_{split}"],
+            scores[split],
+            data[f"groups_{split}"],
+            data[f"timestamps_{split}"],
+            top_k=top_k,
+        )
 
 # --------------------------------------------------------------------------- results
 
@@ -312,6 +330,8 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
         **{f"{split}_{k}": data["summary"][split][k] for split in SPLITS for k in ("samples", "frauds")},
         "alpha": getattr(args, "alpha", ""),  # lstm has no logistic readout
         "threshold": metrics["test"]["threshold_used"],
+        "min_recall": getattr(args, "min_recall", ""),
+        "top_k": getattr(args, "top_k", ""),
         **{f"{split}_{m}": metrics[split][m] for split in EVAL_SPLITS for m in METRIC_NAMES},
         **extra,
     }
@@ -433,17 +453,34 @@ def build_parser():
     readout = argparse.ArgumentParser(add_help=False)
     readout.add_argument("--alpha", type=float, default=1.0, help="readout regularization (C = 1/alpha)")
 
+    evaluation = argparse.ArgumentParser(add_help=False)
+    evaluation.add_argument(
+        "--min-recall",
+        type=float,
+        default=0.8,
+        help=(
+            "minimum validation fraud recall required when selecting the "
+            "decision threshold that minimizes false positives"
+        ),
+    )
+    evaluation.add_argument(
+        "--top-k",
+        type=int,
+        default=100,
+        help="maximum customer/card alerts reviewed per day for Card Precision@K",
+    )
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare", parents=[common], help="data preparation only")
     commands.add_parser(
         "baseline",
-        parents=[common, run, readout],
+        parents=[common, run, readout, evaluation],
         help="logistic regression on the raw (flattened) feature windows",
     )
 
     lstm_parser = commands.add_parser(
-        "lstm", parents=[common, run], help="LSTM classifier on transaction windows"
+        "lstm", parents=[common, run, evaluation], help="LSTM classifier on transaction windows"
     )
     lstm_parser.add_argument("--hidden-size", type=int, default=32)
     lstm_parser.add_argument("--epochs", type=int, default=50)
@@ -453,7 +490,7 @@ def build_parser():
     lstm_parser.add_argument("--seed", type=int, default=42)
 
     qrc_parser = commands.add_parser(
-        "qrc", parents=[common, run, readout], help="quantum reservoir + logistic readout"
+        "qrc", parents=[common, run, readout, evaluation], help="quantum reservoir + logistic readout"
     )
     qrc_parser.add_argument("--backend", choices=BACKEND_NAMES, default="estimator-exact")
     qrc_parser.add_argument("--precision", type=float, default=0.05,
@@ -490,7 +527,7 @@ def main(argv=None):
     extra, reservoir_info = {}, None
     if args.command == "baseline":
         features = baseline_features(data)
-        metrics, scores = fit_and_evaluate(features, data, args.alpha)
+        metrics, scores = fit_and_evaluate(features, data, args.alpha, args.min_recall)
     elif args.command == "lstm":
         splits = {
             split: (data[f"X_{split}"], data[f"y_{split}"])
@@ -504,6 +541,7 @@ def main(argv=None):
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
             patience=args.patience,
+            min_recall=args.min_recall,
         )
         metrics, scores = result["metrics"], result["scores"]
         extra["training_seconds"] = result["seconds"]
@@ -511,7 +549,9 @@ def main(argv=None):
         start = time.perf_counter()
         features, reservoir_info = qrc_features(data, args)
         extra["reservoir_seconds"] = time.perf_counter() - start
-        metrics, scores = fit_and_evaluate(features, data, args.alpha)
+        metrics, scores = fit_and_evaluate(features, data, args.alpha, args.min_recall)
+
+    add_operational_metrics(metrics, scores, data, args.top_k)
     run_dir = save_run(args, data, metrics, scores, extra, reservoir_info)
     print_metrics(metrics)
     print(f"\nResults saved to {run_dir}")
@@ -520,3 +560,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+

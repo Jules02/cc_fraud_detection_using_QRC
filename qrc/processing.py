@@ -77,5 +77,10 @@ class DataProcessor:
             "groups_validation": validation["CUSTOMER_ID"].to_numpy(),
             "groups_test": test["CUSTOMER_ID"].to_numpy(),
 
+            # Metadata aligned row-for-row with X/y. Used for operational metrics
+            "timestamps_train": train["TX_DATETIME"].to_numpy(),
+            "timestamps_validation": validation["TX_DATETIME"].to_numpy(),
+            "timestamps_test": test["TX_DATETIME"].to_numpy(),
+
             "features": self.feature_sets[feature_set],
         }
