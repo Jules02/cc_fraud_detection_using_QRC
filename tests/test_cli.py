@@ -9,6 +9,7 @@ import pytest
 import experiments.cli as cli
 from experiments.cli import main
 from qrc.encodings import DenseAngleEncoding
+from qrc.reservoirs import HamiltonianReservoir, RandomCircuitReservoir
 
 
 def _metrics(run_dir):
@@ -105,6 +106,8 @@ def test_summary_records_reservoir_and_metrics(tmp_path):
         "42",
     )
     assert row["backend_precision"] == ""  # unused by the exact backend
+    assert row["hamiltonian"] == "random"
+    assert row["topology"] == ""
     for split in ("validation", "test"):
         for metric in cli.METRIC_NAMES:
             assert row[f"{split}_{metric}"] != ""
@@ -184,3 +187,66 @@ def test_qrc_cli_runs_with_fewer_input_qubits(tmp_path):
 
     for split in ("validation", "test"):
         assert 0.0 <= metrics[split]["pr_auc"] <= 1.0
+
+
+def test_qrc_cli_selects_hamiltonian_and_topology(monkeypatch):
+    args = cli.build_parser().parse_args(
+        [
+            "qrc",
+            "--n-input-qubits",
+            "7",
+            "--n-mem-qubits",
+            "1",
+            "--hamiltonian",
+            "tfim",
+            "--topology",
+            "ring",
+        ]
+    )
+    captured = []
+
+    class RecordingProtocol:
+        def __init__(self, *protocol_args):
+            captured.append(protocol_args[1])
+
+        def run(self, windows):
+            return np.zeros((len(windows), 1))
+
+    monkeypatch.setattr(cli, "QRCProtocol", RecordingProtocol)
+    monkeypatch.setattr(cli, "make_backend", lambda *args: args)
+    data = {
+        f"X_{split}": np.zeros((1, 1, 7)) for split in ("train", "validation", "test")
+    }
+
+    _, reservoir_info = cli.qrc_features(data, args)
+
+    assert len(captured) == 1
+    assert isinstance(captured[0], HamiltonianReservoir)
+    assert captured[0].hamiltonian.num_qubits == 8
+    assert len(captured[0].hamiltonian.params) == 8
+    assert reservoir_info["hamiltonian"] == "tfim"
+    assert reservoir_info["topology"] == "ring"
+
+
+def test_qrc_cli_keeps_random_reservoir_as_default(monkeypatch):
+    args = cli.build_parser().parse_args(["qrc", "--n-input-qubits", "7"])
+    captured = []
+
+    class RecordingProtocol:
+        def __init__(self, *protocol_args):
+            captured.append(protocol_args[1])
+
+        def run(self, windows):
+            return np.zeros((len(windows), 1))
+
+    monkeypatch.setattr(cli, "QRCProtocol", RecordingProtocol)
+    monkeypatch.setattr(cli, "make_backend", lambda *args: args)
+    data = {
+        f"X_{split}": np.zeros((1, 1, 7)) for split in ("train", "validation", "test")
+    }
+
+    _, reservoir_info = cli.qrc_features(data, args)
+
+    assert isinstance(captured[0], RandomCircuitReservoir)
+    assert reservoir_info["hamiltonian"] == "random"
+    assert reservoir_info["topology"] == ""

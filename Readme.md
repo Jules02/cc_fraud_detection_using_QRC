@@ -52,12 +52,12 @@ Every experiment is one command:
 python -m experiments.cli <command> [options]
 ```
 
-| Command    | What it does                                                                                  |
-|------------|-----------------------------------------------------------------------------------------------|
-| `prepare`  | Data preparation only. Prints the split shapes and fraud counts.                             |
-| `baseline` | Classical control: the logistic readout fitted directly on the raw (flattened) windows.       |
+| Command    | What it does                                                                                             |
+| ---------- | -------------------------------------------------------------------------------------------------------- |
+| `prepare`  | Data preparation only. Prints the split shapes and fraud counts.                                         |
+| `baseline` | Classical control: the logistic readout fitted directly on the raw (flattened) windows.                  |
 | `lstm`     | Classical control: an LSTM trained on the windows; validation loss picks the best epoch (needs PyTorch). |
-| `qrc`      | Runs the quantum reservoir on each window, then fits the same logistic readout on its outputs. |
+| `qrc`      | Runs the quantum reservoir on each window, then fits the same logistic readout on its outputs.           |
 
 All commands run the same data preparation:
 
@@ -91,56 +91,63 @@ python -m experiments.cli qrc --feature-set 10 --n-mem-qubits 3 --depth 3 --obse
 
 # The shared dataset from SharePoint (see "Data" below)
 python -m experiments.cli qrc --data load --backend gaussian --precision 0.05
+
+# Run with specific topology and hamiltonian
+python -m experiments.cli qrc --size small --n-input-qubits 4 --n-mem-qubits 3 --hamiltonian native-exchange --topology fully-connected
+python -m experiments.cli qrc --size small --n-input-qubits 6 --n-mem-qubits 3 --hamiltonian tfim --topology ring
+python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
 ```
 
 ### Options
 
 **Data**, available for every command:
 
-| Option                        | Default    | Meaning                                                                      |
-|-------------------------------|------------|------------------------------------------------------------------------------|
-| `--data simulate\|load`       | `simulate` | Simulate a dataset, or load the split `.pkl` files                           |
-| `--size small\|medium\|large` | `medium`   | Simulation preset: 10 / 50 / 100 customers over 365 days                     |
-| `--data-seed`                 | `0`        | Simulation seed                                                              |
-| `--save-data DIR`             | –          | Also write the simulated splits to `DIR` (reload with `--data load --data-dir DIR`) |
-| `--data-dir DIR`              | `data/`    | Where `--data load` reads `transactions_{train,validation,test}.pkl`         |
-| `--start-date`, `--end-date`  | –          | Restrict the loaded period (`YYYY-MM-DD`)                                    |
+| Option                        | Default    | Meaning                                                                                                                                              |
+| ----------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--data simulate\|load`       | `simulate` | Simulate a dataset, or load the split `.pkl` files                                                                                                   |
+| `--size small\|medium\|large` | `medium`   | Simulation preset: 10 / 50 / 100 customers over 365 days                                                                                             |
+| `--data-seed`                 | `0`        | Simulation seed                                                                                                                                      |
+| `--save-data DIR`             | –          | Also write the simulated splits to `DIR` (reload with `--data load --data-dir DIR`)                                                                  |
+| `--data-dir DIR`              | `data/`    | Where `--data load` reads `transactions_{train,validation,test}.pkl`                                                                                 |
+| `--start-date`, `--end-date`  | –          | Restrict the loaded period (`YYYY-MM-DD`)                                                                                                            |
 | `--feature-set 7\|10\|15`     | `7`        | Features selected by the feature analysis. Each set extends the previous one ([list](docs/data_pipeline.md#4-feature-analysis-and-the-feature-sets)) |
-| `--window-length`             | `3`        | Number of transactions per customer window                                   |
+| `--window-length`             | `3`        | Number of transactions per customer window                                                                                                           |
 
 **Readout and output**, for `baseline` and `qrc` (`--output-dir` also applies to `lstm`):
 
-| Option         | Default        | Meaning                                    |
-|----------------|----------------|--------------------------------------------|
-| `--alpha`      | `1.0`          | Readout regularisation (`C = 1/alpha`)     |
-| `--output-dir` | `results/runs` | Where runs are saved                       |
+| Option         | Default        | Meaning                                |
+| -------------- | -------------- | -------------------------------------- |
+| `--alpha`      | `1.0`          | Readout regularisation (`C = 1/alpha`) |
+| `--output-dir` | `results/runs` | Where runs are saved                   |
 
 **LSTM**, for `lstm` only:
 
-| Option            | Default | Meaning                                         |
-|-------------------|---------|-------------------------------------------------|
-| `--hidden-size`   | `32`    | LSTM hidden units                               |
-| `--epochs`        | `50`    | Maximum training epochs                         |
-| `--batch-size`    | `256`   | Training batch size                             |
-| `--learning-rate` | `1e-3`  | Adam learning rate                              |
+| Option            | Default | Meaning                                                    |
+| ----------------- | ------- | ---------------------------------------------------------- |
+| `--hidden-size`   | `32`    | LSTM hidden units                                          |
+| `--epochs`        | `50`    | Maximum training epochs                                    |
+| `--batch-size`    | `256`   | Training batch size                                        |
+| `--learning-rate` | `1e-3`  | Adam learning rate                                         |
 | `--patience`      | `8`     | Epochs without validation-loss improvement before stopping |
-| `--seed`          | `42`    | Training seed                                   |
+| `--seed`          | `42`    | Training seed                                              |
 
 **Reservoir and backend**, for `qrc` only:
 
-| Option             | Default         | Meaning                                                                 |
-|--------------------|-----------------|-------------------------------------------------------------------------|
-| `--backend`        | `estimator-exact` | `estimator-exact`, `statevector`, `gaussian` or `shots` (see below)   |
-| `--precision`      | `0.05`          | Target standard error per expectation value (`gaussian` / `shots`)      |
-| `--n-input-qubits` | number of features | Input qubits. With fewer qubits than features, dense angle encoding is used (see below) |
-| `--n-mem-qubits`   | `2`             | Memory qubits                                                           |
-| `--depth`          | `2`             | Reservoir circuit depth                                                 |
-| `--entangler`      | `cx`            | `cx` or `cry`                                                           |
-| `--encoding-layers`  | `1`           | Times each transaction is encoded (data re-uploading). `1` is plain angle encoding |
-| `--encoding-scaling` | `π`           | Rotation angle per unit of (scaled) feature, in each encoding layer     |
-| `--reset-inputs`   | off             | Reset the input qubits before each transaction is encoded. Needs an Estimator backend (density-matrix simulation, slower) |
-| `--observables`    | `Z`             | E.g. `Z`, `Z+ZZ`, `XX-all`, `XYZ` (see `build_observables` in `qrc/observables.py`) |
-| `--seed`           | `42`            | Reservoir and sampling seed                                             |
+| Option               | Default            | Meaning                                                                                                                   |
+| -------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `--backend`          | `estimator-exact`  | `estimator-exact`, `statevector`, `gaussian` or `shots` (see below)                                                       |
+| `--precision`        | `0.05`             | Target standard error per expectation value (`gaussian` / `shots`)                                                        |
+| `--n-input-qubits`   | number of features | Input qubits. With fewer qubits than features, dense angle encoding is used (see below)                                   |
+| `--n-mem-qubits`     | `2`                | Memory qubits                                                                                                             |
+| `--hamiltonian`      | `random`           | `random`, `tfim`, `tfim_longitudinal`, `tfim_native` or `native-exchange`                                                 |
+| `--topology`         | `linear`           | Hamiltonian connectivity: `linear`, `ring` or `fully_connected`; ignored for `--hamiltonian random`                       |
+| `--depth`            | `2`                | Reservoir circuit depth                                                                                                   |
+| `--entangler`        | `cx`               | `cx` or `cry`                                                                                                             |
+| `--encoding-layers`  | `1`                | Times each transaction is encoded (data re-uploading). `1` is plain angle encoding                                        |
+| `--encoding-scaling` | `π`                | Rotation angle per unit of (scaled) feature, in each encoding layer                                                       |
+| `--reset-inputs`     | off                | Reset the input qubits before each transaction is encoded. Needs an Estimator backend (density-matrix simulation, slower) |
+| `--observables`      | `Z`                | E.g. `Z`, `Z+ZZ`, `XX-all`, `XYZ` (see `build_observables` in `qrc/observables.py`)                                       |
+| `--seed`             | `42`               | Reservoir and sampling seed                                                                                               |
 
 The backends:
 
@@ -148,6 +155,9 @@ The backends:
 - `statevector`: exact simulation that runs one window at a time with `qiskit.quantum_info.Statevector`. It is the simple reference implementation: same results as `estimator-exact`, but several times slower.
 - `gaussian`: exact expectation values plus Gaussian noise of width `--precision`. This is a cheap stand-in for shot noise.
 - `shots`: real shot sampling with about `1/precision²` shots.
+
+The reservoir can be a random circuit (the default) or a Trotterized Hamiltonian model.
+The Hamiltonian choice and topology are included in the run configuration and summary.
 
 The encodings:
 
@@ -221,13 +231,13 @@ NaN handling, preprocessing and windowing), see **[docs/data_pipeline.md](docs/d
 
 The CLI is the recommended entry point. These scripts are still useful for exploration:
 
-| Script                              | Purpose                                                                              |
-|-------------------------------------|--------------------------------------------------------------------------------------|
-| `experiments/run_data.py`           | Data → features → analysis plots → model input, from the daily split files           |
-| `experiments/dataset_analysis.py`   | Exploration and feature analysis of a simulated dataset                              |
-| `experiments/pipeline.py`           | The original single-file end-to-end QRC run (configuration is set in the file)       |
-| `experiments/pipeline_estimator.py` | Same as above, comparing the Estimator backends (`--precision`)                      |
-| `experiments/run_benchmarks.py`     | QRC on synthetic tasks with known answers (memory, parity, NARMA10)                  |
+| Script                              | Purpose                                                                        |
+| ----------------------------------- | ------------------------------------------------------------------------------ |
+| `experiments/run_data.py`           | Data → features → analysis plots → model input, from the daily split files     |
+| `experiments/dataset_analysis.py`   | Exploration and feature analysis of a simulated dataset                        |
+| `experiments/pipeline.py`           | The original single-file end-to-end QRC run (configuration is set in the file) |
+| `experiments/pipeline_estimator.py` | Same as above, comparing the Estimator backends (`--precision`)                |
+| `experiments/run_benchmarks.py`     | QRC on synthetic tasks with known answers (memory, parity, NARMA10)            |
 
 Run them as modules from the repository root, e.g. `python -m experiments.run_benchmarks`.
 
