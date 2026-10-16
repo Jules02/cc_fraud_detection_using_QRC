@@ -130,7 +130,7 @@ python -m experiments.cli qrc --data load --backend gaussian --precision 0.05
 
 | Option             | Default         | Meaning                                                                 |
 |--------------------|-----------------|-------------------------------------------------------------------------|
-| `--backend`        | `estimator-exact` | `estimator-exact`, `statevector`, `gaussian` or `shots` (see below)   |
+| `--backend`        | `estimator-exact` | `estimator-exact`, `gaussian` or `shots` (see below)                  |
 | `--precision`      | `0.05`          | Target standard error per expectation value (`gaussian` / `shots`)      |
 | `--n-input-qubits` | number of features | Input qubits. With fewer qubits than features, dense angle encoding is used (see below) |
 | `--n-mem-qubits`   | `2`             | Memory qubits                                                           |
@@ -138,14 +138,13 @@ python -m experiments.cli qrc --data load --backend gaussian --precision 0.05
 | `--entangler`      | `cx`            | `cx` or `cry`                                                           |
 | `--encoding-layers`  | `1`           | Times each transaction is encoded (data re-uploading). `1` is plain angle encoding |
 | `--encoding-scaling` | `π`           | Rotation angle per unit of (scaled) feature, in each encoding layer     |
-| `--reset-inputs`   | off             | Reset the input qubits before each transaction is encoded. Needs an Estimator backend (density-matrix simulation, slower) |
+| `--reset-inputs`   | off             | Reset the input qubits before each transaction is encoded (density-matrix simulation, slower) |
 | `--observables`    | `Z`             | E.g. `Z`, `Z+ZZ`, `XX-all`, `XYZ` (see `build_observables` in `qrc/observables.py`) |
 | `--seed`           | `42`            | Reservoir and sampling seed                                             |
 
 The backends:
 
-- `estimator-exact` (default): exact, noiseless simulation with the Qiskit Aer Estimator. Windows are sent to Aer in batches, so it is the fastest exact option.
-- `statevector`: exact simulation that runs one window at a time with `qiskit.quantum_info.Statevector`. It is the simple reference implementation: same results as `estimator-exact`, but several times slower.
+- `estimator-exact` (default): exact, noiseless simulation with the Qiskit Aer Estimator. Windows are sent to Aer in batches.
 - `gaussian`: exact expectation values plus Gaussian noise of width `--precision`. This is a cheap stand-in for shot noise.
 - `shots`: real shot sampling with about `1/precision²` shots.
 
@@ -239,13 +238,13 @@ After `pip install -e .`, `qrc` can be imported from anywhere:
 from qrc.encodings import AngleEncoding
 from qrc.reservoirs import RandomCircuitReservoir
 from qrc.observables import build_observables
-from qrc.backends.statevector import StatevectorBackend
+from qrc.backends.estimator import EstimatorBackend
 from qrc.protocol import QRCProtocol
 
 encoder = AngleEncoding(num_qubits=4)
 reservoir = RandomCircuitReservoir(num_input_qubits=4, num_mem_qubits=2, depth=2, rng=42)
 observables = build_observables("Z+ZZ", reservoir.num_qubits)
-protocol = QRCProtocol(encoder, reservoir, observables, StatevectorBackend())
+protocol = QRCProtocol(encoder, reservoir, observables, EstimatorBackend())
 
 features = protocol.run(X)   # X: (n_windows, window_length, n_features)
 ```
@@ -271,7 +270,7 @@ cc_fraud_detection_using_QRC/
 │   ├── features/            # fraud feature engineering
 │   ├── analysis/            # exploration, feature scoring and selection, plots
 │   ├── benchmarks/          # synthetic tasks: memory, parity, NARMA10
-│   ├── backends/            # statevector, Qiskit Aer Estimator, spin-pulse
+│   ├── backends/            # Qiskit Aer Estimator, spin-pulse
 │   ├── baselines/           # classical baseline models (LSTM)
 │   ├── processing.py        # final model input: feature selection, imputation, scaling
 │   ├── sequences.py         # 2D features → (n, window_length, features) per-customer windows

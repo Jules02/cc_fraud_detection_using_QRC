@@ -27,6 +27,8 @@ Examples:
     python -m experiments.cli lstm --size medium
     python -m experiments.cli qrc --size medium --backend estimator-exact
     python -m experiments.cli qrc --data load --data-dir data --backend gaussian --precision 0.05
+
+To run many configurations on the same prepared data, see ``experiments/sweep.py``.
 """
 
 import argparse
@@ -42,7 +44,6 @@ import pandas as pd
 
 import qrc
 from qrc.backends.estimator import EstimatorBackend
-from qrc.backends.statevector import StatevectorBackend
 from qrc.datasets import load_split_files, split_dataset
 from qrc.datasets.create_dataset import add_frauds, generate_dataset
 from qrc.datasets.split_dataset import main as split_and_save_dataset
@@ -96,7 +97,7 @@ SIZES = {
 }
 SIMULATION = dict(nb_days=365, start_date="2025-01-01", r=5)
 
-BACKEND_NAMES = ("statevector", "estimator-exact", "gaussian", "shots")
+BACKEND_NAMES = ("estimator-exact", "gaussian", "shots")
 METRIC_NAMES = ("average_precision", "roc_auc", "f1_score", "precision", "recall", "matthews_corr_coef", "balanced_accuracy")
 # per fraud category (qrc.evaluation); only when the data carries TX_FRAUD_SCENARIO
 CATEGORY_METRIC_NAMES = tuple(f"average_precision_{c}" for c in CATEGORIES)
@@ -197,12 +198,6 @@ def print_data_summary(data):
 # --------------------------------------------------------------------------- models
 
 def make_backend(name, precision, seed, reset_inputs=False):
-    if name == "statevector":
-        if reset_inputs:
-            raise ValueError(
-                "--reset-inputs needs an Estimator backend, not statevector"
-            )
-        return StatevectorBackend()
     if name == "estimator-exact":
         return EstimatorBackend(reset_inputs=reset_inputs)
     return EstimatorBackend(
@@ -514,7 +509,11 @@ def main(argv=None):
     print_data_summary(data)
     if args.command == "prepare":
         return None
+    return run(args, data)
 
+
+def run(args, data):
+    """Fit and evaluate the model of `args.command` on the prepared `data`; returns the run directory."""
     extra, reservoir_info = {}, None
     if args.command == "baseline":
         features = baseline_features(data)
