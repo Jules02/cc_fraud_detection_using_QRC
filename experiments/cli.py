@@ -48,6 +48,7 @@ from qrc.backends.estimator import EstimatorBackend
 from qrc.datasets import load_split_files, split_dataset
 from qrc.datasets.create_dataset import add_frauds, generate_dataset
 from qrc.datasets.split_dataset import main as split_and_save_dataset
+from qrc.decision import card_precision_top_k
 from qrc.encodings import AngleEncoding, ReuploadingEncoding, DenseAngleEncoding
 from qrc.evaluation import CATEGORIES, categorize, category_metrics
 from qrc.features import FeatureEngineer
@@ -116,9 +117,20 @@ HAMILTONIAN_BUILDERS = {
 }
 
 BACKEND_NAMES = ("estimator-exact", "gaussian", "shots")
-METRIC_NAMES = ("average_precision", "roc_auc", "f1_score", "precision", "recall", "matthews_corr_coef", "balanced_accuracy")
+METRIC_NAMES = (
+    "average_precision",
+    "roc_auc",
+    "f1_score",
+    "precision",
+    "recall",
+    "false_positive_rate",
+    "matthews_corr_coef",
+    "balanced_accuracy",
+    "card_precision_top_k"
+)
 # per fraud category (qrc.evaluation); only when the data carries TX_FRAUD_SCENARIO
 CATEGORY_METRIC_NAMES = tuple(f"average_precision_{c}" for c in CATEGORIES)
+
 EVAL_SPLITS = ("validation", "test")
 SUMMARY_FIELDS = (
     # run and data
@@ -145,13 +157,12 @@ SUMMARY_FIELDS = (
     # lstm only
     "training_seconds",
     # readout and metrics
-    "alpha", "threshold",
+    "alpha", "threshold", "min_recall", "top_k",
     *(f"{split}_{m}" for split in EVAL_SPLITS for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES)),
 )
 
 
 # --------------------------------------------------------------------------- data
-
 
 def load_transactions(args):
     """Return the raw ``(train, validation, test)`` transactions from the chosen source."""
@@ -230,7 +241,6 @@ def print_data_summary(data):
 
 # --------------------------------------------------------------------------- models
 
-
 def make_backend(name, precision, seed, reset_inputs=False):
     if name == "estimator-exact":
         return EstimatorBackend(reset_inputs=reset_inputs)
@@ -308,10 +318,13 @@ def qrc_features(data, args):
     return features, reservoir_info
 
 
-def fit_and_evaluate(features, data, alpha):
+def fit_and_evaluate(features, data, alpha, min_recall):
     """Fit the readout on train, evaluate on validation and test."""
     readout = ClassicalReadout(alpha=alpha)
     readout.fit(features["train"], data["y_train"])
+    readout.select_decision_threshold(
+        features["validation"], data["y_validation"], min_recall=min_recall
+    )
 
     metrics, scores = {}, {}
     for split in ("validation", "test"):
@@ -322,9 +335,18 @@ def fit_and_evaluate(features, data, alpha):
         scores[split] = split_scores
     return metrics, scores
 
+def add_operational_metrics(metrics, scores, data, top_k):
+    """Add daily Card Precision@K to validation and test metrics."""
+    for split in EVAL_SPLITS:
+        metrics[split]["card_precision_top_k"] = card_precision_top_k(
+            data[f"y_{split}"],
+            scores[split],
+            data[f"groups_{split}"],
+            data[f"timestamps_{split}"],
+            top_k=top_k,
+        )
 
 # --------------------------------------------------------------------------- results
-
 
 def data_source(args):
     if args.data == "load":
@@ -387,7 +409,9 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
         "window_length": args.window_length,
         **{f"{split}_{k}": v for split in SPLITS for k, v in data["summary"][split].items()},
         "alpha": getattr(args, "alpha", ""),  # lstm has no logistic readout
-        "threshold": metrics["test"]["threshold_used"],
+        "threshold": metrics["validation"]["threshold_used"],  # threshold is frozen and reused on test
+        "min_recall": getattr(args, "min_recall", ""),
+        "top_k": getattr(args, "top_k", ""),
         **{f"{split}_{m}": metrics[split][m] for split in EVAL_SPLITS
            for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES) if m in metrics[split]},
         **extra,
@@ -474,7 +498,6 @@ def print_metrics(metrics):
 
 # --------------------------------------------------------------------------- CLI
 
-
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
     data = common.add_argument_group("data")
@@ -527,6 +550,23 @@ def build_parser():
         "--alpha", type=float, default=1.0, help="readout regularization (C = 1/alpha)"
     )
 
+    evaluation = argparse.ArgumentParser(add_help=False)
+    evaluation.add_argument(
+        "--min-recall",
+        type=float,
+        default=0.8,
+        help=(
+            "minimum validation fraud recall required when selecting the "
+            "decision threshold that minimizes false positives"
+        ),
+    )
+    evaluation.add_argument(
+        "--top-k",
+        type=int,
+        default=100,
+        help="maximum customer/card alerts reviewed per day for Card Precision@K",
+    )
+
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -534,12 +574,12 @@ def build_parser():
     commands.add_parser("prepare", parents=[common], help="data preparation only")
     commands.add_parser(
         "baseline",
-        parents=[common, run, readout],
+        parents=[common, run, readout, evaluation],
         help="logistic regression on the raw (flattened) feature windows",
     )
 
     lstm_parser = commands.add_parser(
-        "lstm", parents=[common, run], help="LSTM classifier on transaction windows"
+        "lstm", parents=[common, run, evaluation], help="LSTM classifier on transaction windows"
     )
     lstm_parser.add_argument("--hidden-size", type=int, default=32)
     lstm_parser.add_argument("--epochs", type=int, default=50)
@@ -550,8 +590,8 @@ def build_parser():
 
     qrc_parser = commands.add_parser(
         "qrc",
-        parents=[common, run, readout],
-        help="quantum reservoir + logistic readout",
+        parents=[common, run, readout, evaluation],
+        help="quantum reservoir + logistic readout"
     )
     qrc_parser.add_argument(
         "--backend", choices=BACKEND_NAMES, default="estimator-exact"
@@ -604,7 +644,6 @@ def build_parser():
     qrc_parser.add_argument(
         "--seed", type=int, default=42, help="reservoir and sampling seed"
     )
-
     return parser
 
 
@@ -623,7 +662,7 @@ def run(args, data):
     extra, reservoir_info = {}, None
     if args.command == "baseline":
         features = baseline_features(data)
-        metrics, scores = fit_and_evaluate(features, data, args.alpha)
+        metrics, scores = fit_and_evaluate(features, data, args.alpha, args.min_recall)
     elif args.command == "lstm":
         splits = {split: (data[f"X_{split}"], data[f"y_{split}"]) for split in SPLITS}
         result = run_lstm_baseline(
@@ -634,6 +673,7 @@ def run(args, data):
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
             patience=args.patience,
+            min_recall=args.min_recall,
         )
         metrics, scores = result["metrics"], result["scores"]
         extra["training_seconds"] = result["seconds"]
@@ -641,11 +681,28 @@ def run(args, data):
         start = time.perf_counter()
         features, reservoir_info = qrc_features(data, args)
         extra["reservoir_seconds"] = time.perf_counter() - start
-        metrics, scores = fit_and_evaluate(features, data, args.alpha)
+        metrics, scores = fit_and_evaluate(
+            features,
+            data,
+            args.alpha,
+            args.min_recall,
+        )
+
+    add_operational_metrics(
+        metrics,
+        scores,
+        data,
+        args.top_k,
+    )
+
     for split, split_scores in scores.items():
         if f"category_{split}" in data:
             metrics[split].update(
-                category_metrics(data[f"y_{split}"], split_scores, data[f"category_{split}"])
+                category_metrics(
+                    data[f"y_{split}"],
+                    split_scores,
+                    data[f"category_{split}"],
+                )
             )
     run_dir = save_run(args, data, metrics, scores, extra, reservoir_info)
     print_metrics(metrics)

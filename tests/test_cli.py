@@ -268,3 +268,113 @@ def test_cli_runs_on_raw_amount_windows(tmp_path):
         (row,) = csv.DictReader(f)
     assert row["run"] == run_dir.name
     assert (row["feature_set"], row["n_features"]) == ("1", "1")
+
+
+def test_evaluation_cli_arguments_are_exposed():
+    args = cli.build_parser().parse_args(
+        ["baseline", "--min-recall", "0.9", "--top-k", "25"]
+    )
+
+    assert args.min_recall == pytest.approx(0.9)
+    assert args.top_k == 25
+
+
+def test_fit_and_evaluate_selects_threshold_on_validation(monkeypatch):
+    calls = []
+
+    class RecordingReadout:
+        def __init__(self, alpha):
+            calls.append(("init", alpha))
+            self.decision_threshold = 0.73
+
+        def fit(self, X, y):
+            calls.append(("fit", X.copy(), y.copy()))
+
+        def select_decision_threshold(self, X, y, *, min_recall):
+            calls.append(("select", X.copy(), y.copy(), min_recall))
+            return self.decision_threshold
+
+        def evaluate(self, X, y):
+            calls.append(("evaluate", X.copy(), y.copy()))
+            scores = np.full(len(y), self.decision_threshold)
+            metrics = {
+                "threshold_used": self.decision_threshold,
+                "average_precision": 0.5,
+                "roc_auc": 0.5,
+                "f1_score": 0.5,
+                "precision": 0.5,
+                "recall": 0.5,
+                "false_positive_rate": 0.5,
+                "matthews_corr_coef": 0.0,
+                "balanced_accuracy": 0.5,
+            }
+            return metrics, y, np.ones(len(y), dtype=int), scores
+
+    monkeypatch.setattr(cli, "ClassicalReadout", RecordingReadout)
+
+    features = {
+        "train": np.array([[1.0], [2.0]]),
+        "validation": np.array([[3.0], [4.0]]),
+        "test": np.array([[5.0], [6.0]]),
+    }
+    data = {
+        "y_train": np.array([0, 1]),
+        "y_validation": np.array([1, 0]),
+        "y_test": np.array([0, 1]),
+    }
+
+    metrics, _ = cli.fit_and_evaluate(
+        features,
+        data,
+        alpha=2.0,
+        min_recall=0.9,
+    )
+
+    assert calls[0] == ("init", 2.0)
+    assert calls[1][0] == "fit"
+    np.testing.assert_array_equal(calls[1][1], features["train"])
+    np.testing.assert_array_equal(calls[1][2], data["y_train"])
+
+    assert calls[2][0] == "select"
+    np.testing.assert_array_equal(calls[2][1], features["validation"])
+    np.testing.assert_array_equal(calls[2][2], data["y_validation"])
+    assert calls[2][3] == pytest.approx(0.9)
+
+    assert [call[0] for call in calls[3:]] == ["evaluate", "evaluate"]
+    assert metrics["validation"]["threshold_used"] == pytest.approx(0.73)
+    assert metrics["test"]["threshold_used"] == pytest.approx(0.73)
+
+
+def test_add_operational_metrics_uses_customer_and_timestamp_metadata(monkeypatch):
+    calls = []
+
+    def fake_card_precision(y, scores, customers, timestamps, *, top_k):
+        calls.append((y.copy(), scores.copy(), customers.copy(), timestamps.copy(), top_k))
+        return 0.4
+
+    monkeypatch.setattr(cli, "card_precision_top_k", fake_card_precision)
+
+    metrics = {"validation": {}, "test": {}}
+    scores = {
+        "validation": np.array([0.2, 0.8]),
+        "test": np.array([0.3, 0.9]),
+    }
+    data = {
+        "y_validation": np.array([0, 1]),
+        "y_test": np.array([0, 1]),
+        "groups_validation": np.array([10, 11]),
+        "groups_test": np.array([20, 21]),
+        "timestamps_validation": np.array(
+            ["2026-01-01", "2026-01-01"], dtype="datetime64[D]"
+        ),
+        "timestamps_test": np.array(
+            ["2026-01-02", "2026-01-02"], dtype="datetime64[D]"
+        ),
+    }
+
+    cli.add_operational_metrics(metrics, scores, data, top_k=25)
+
+    assert len(calls) == 2
+    assert all(call[-1] == 25 for call in calls)
+    assert metrics["validation"]["card_precision_top_k"] == pytest.approx(0.4)
+    assert metrics["test"]["card_precision_top_k"] == pytest.approx(0.4)
