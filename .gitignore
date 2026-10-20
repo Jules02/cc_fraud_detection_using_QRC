@@ -225,6 +225,8 @@ __marimo__/
 /logs/*
 /reference_data/*
 /results/*
+!/results/armb/
+/results/armb/**/scores.npz
 
 # Generated datasets (see Readme: download from SharePoint).
 /data/

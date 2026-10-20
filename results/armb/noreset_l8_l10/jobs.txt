@@ -1,0 +1,7 @@
+# Arm B no-reset at L=8 and 10: same as results/armb/sweep1 at these L but without --reset-inputs, exact
+qrc --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 8 --n-mem-qubits 3 --depth 4 --observables XYZ+XYZ-2body --backend estimator-exact --seed 42 --output-dir results/armb/noreset_l8_l10
+qrc --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 8 --n-mem-qubits 3 --depth 4 --observables XYZ+XYZ-2body --backend estimator-exact --seed 43 --output-dir results/armb/noreset_l8_l10
+qrc --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 8 --n-mem-qubits 3 --depth 4 --observables XYZ+XYZ-2body --backend estimator-exact --seed 44 --output-dir results/armb/noreset_l8_l10
+qrc --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 10 --n-mem-qubits 3 --depth 4 --observables XYZ+XYZ-2body --backend estimator-exact --seed 42 --output-dir results/armb/noreset_l8_l10
+qrc --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 10 --n-mem-qubits 3 --depth 4 --observables XYZ+XYZ-2body --backend estimator-exact --seed 43 --output-dir results/armb/noreset_l8_l10
+qrc --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 10 --n-mem-qubits 3 --depth 4 --observables XYZ+XYZ-2body --backend estimator-exact --seed 44 --output-dir results/armb/noreset_l8_l10

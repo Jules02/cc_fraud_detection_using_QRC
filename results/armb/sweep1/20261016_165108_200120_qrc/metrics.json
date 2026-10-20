@@ -1,0 +1,33 @@
+{
+  "validation": {
+    "f1_score": 0.12124942298815203,
+    "precision": 0.06559482471578747,
+    "recall": 0.8001160429358862,
+    "false_positive_rate": 0.39863630829173263,
+    "roc_auc": 0.8246167404639502,
+    "average_precision": 0.5846586366594884,
+    "matthews_corr_coef": 0.14738168395401255,
+    "balanced_accuracy": 0.7007398673220768,
+    "threshold_used": 0.010723038940262634,
+    "card_precision_top_k": 0.2798148148148148,
+    "average_precision_amount": 1.0,
+    "average_precision_terminal": 0.0055400763673539005,
+    "average_precision_customer": 0.13373407484383987
+  },
+  "test": {
+    "f1_score": 0.1267988283737318,
+    "precision": 0.06874252048237135,
+    "recall": 0.8156744948115784,
+    "false_positive_rate": 0.39481515450137084,
+    "roc_auc": 0.8369167550782963,
+    "average_precision": 0.6088970665858722,
+    "matthews_corr_coef": 0.1562057031924267,
+    "balanced_accuracy": 0.7104296701551038,
+    "threshold_used": 0.010723038940262634,
+    "card_precision_top_k": 0.3023214285714286,
+    "average_precision_amount": 0.9999999999999999,
+    "average_precision_terminal": 0.005902359505990446,
+    "average_precision_customer": 0.1446000207059053
+  },
+  "reservoir_seconds": 194.83001749997493
+}
