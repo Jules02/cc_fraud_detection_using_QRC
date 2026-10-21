@@ -225,8 +225,17 @@ __marimo__/
 /logs/*
 /reference_data/*
 /results/*
+!/results/arma/
+/results/arma/summary.csv
+/results/arma/jobs.txt
+
 !/results/armb/
 /results/armb/**/scores.npz
+/results/arma/**/scores.npz
+
+
+
+
 
 # Generated datasets (see Readme: download from SharePoint).
 /data/

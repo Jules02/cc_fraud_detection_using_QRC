@@ -97,7 +97,20 @@ _SET_15 = _SET_10 + [
     "CUSTOMER_TIME_GAP_SECONDS",
     "TX_DURING_WEEKEND",
 ]
-FEATURE_SETS = {1: _SET_1, 7: _SET_7, 10: _SET_10, 15: _SET_15}
+_SET_TX_AMOUNT_ENGINEERED = [
+    "CUSTOMER_AMOUNT_DEVIATION_30D",
+    "CUSTOMER_AMOUNT_RATIO_90D",
+    "CUSTOMER_AMOUNT_SHIFT_7D_30D",
+    "CUSTOMER_ACTIVITY_AMOUNT_30D",
+    "TX_AMOUNT_LOG",
+]
+FEATURE_SETS = {
+    1: _SET_1,
+    7: _SET_7,
+    10: _SET_10,
+    15: _SET_15,
+    20: _SET_TX_AMOUNT_ENGINEERED,
+}
 FEATURE_WINDOWS = (1, 7, 30, 90, 180)
 # TRAIN_RATIO, VALIDATION_RATIO = 0.70, 0.15
 
@@ -126,7 +139,7 @@ METRIC_NAMES = (
     "false_positive_rate",
     "matthews_corr_coef",
     "balanced_accuracy",
-    "card_precision_top_k"
+    "card_precision_top_k",
 )
 # per fraud category (qrc.evaluation); only when the data carries TX_FRAUD_SCENARIO
 CATEGORY_METRIC_NAMES = tuple(f"average_precision_{c}" for c in CATEGORIES)
@@ -134,9 +147,23 @@ CATEGORY_METRIC_NAMES = tuple(f"average_precision_{c}" for c in CATEGORIES)
 EVAL_SPLITS = ("validation", "test")
 SUMMARY_FIELDS = (
     # run and data
-    "run", "commit", "command", "data", "size", "data_seed", "data_dir", "start_date", "end_date",
-    "feature_set", "n_features", "window_length",
-    *(f"{split}_{k}" for split in SPLITS for k in ("samples", "frauds", *(f"frauds_{c}" for c in CATEGORIES))),
+    "run",
+    "commit",
+    "command",
+    "data",
+    "size",
+    "data_seed",
+    "data_dir",
+    "start_date",
+    "end_date",
+    "feature_set",
+    "n_features",
+    "window_length",
+    *(
+        f"{split}_{k}"
+        for split in SPLITS
+        for k in ("samples", "frauds", *(f"frauds_{c}" for c in CATEGORIES))
+    ),
     # reservoir (qrc only)
     "backend",
     "backend_precision",
@@ -154,15 +181,28 @@ SUMMARY_FIELDS = (
     "reservoir_seconds",
     "hamiltonian",
     "topology",
+    # classical tanh random map
+    "classical_model",
+    "random_map_width",
+    "random_map_scale",
+    "classical_seconds",
     # lstm only
     "training_seconds",
     # readout and metrics
-    "alpha", "threshold", "min_recall", "top_k",
-    *(f"{split}_{m}" for split in EVAL_SPLITS for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES)),
+    "alpha",
+    "threshold",
+    "min_recall",
+    "top_k",
+    *(
+        f"{split}_{m}"
+        for split in EVAL_SPLITS
+        for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES)
+    ),
 )
 
 
 # --------------------------------------------------------------------------- data
+
 
 def load_transactions(args):
     """Return the raw ``(train, validation, test)`` transactions from the chosen source."""
@@ -196,8 +236,11 @@ def prepare_data(args):
     full_data = pd.concat([train, validation, test], ignore_index=True)
     # kept aside for evaluation only, looked up by transaction since feature engineering reorders rows
     meta = (
-        full_data.set_index("TRANSACTION_ID")[["TX_FRAUD", "TX_FRAUD_SCENARIO", "TX_AMOUNT"]]
-        if "TX_FRAUD_SCENARIO" in full_data else None
+        full_data.set_index("TRANSACTION_ID")[
+            ["TX_FRAUD", "TX_FRAUD_SCENARIO", "TX_AMOUNT"]
+        ]
+        if "TX_FRAUD_SCENARIO" in full_data
+        else None
     )
     full_data = full_data.drop(
         columns=["TX_FRAUD_SCENARIO"], errors="ignore"
@@ -224,9 +267,13 @@ def prepare_data(args):
     if meta is not None:
         for split in SPLITS:
             rows = meta.loc[data[f"ids_{split}"]]
-            category = categorize(rows["TX_FRAUD"], rows["TX_FRAUD_SCENARIO"], rows["TX_AMOUNT"])
+            category = categorize(
+                rows["TX_FRAUD"], rows["TX_FRAUD_SCENARIO"], rows["TX_AMOUNT"]
+            )
             if not np.array_equal(category != "legit", data[f"y_{split}"] == 1):
-                raise ValueError(f"{split}: fraud categories do not line up with the labels")
+                raise ValueError(
+                    f"{split}: fraud categories do not line up with the labels"
+                )
             data[f"category_{split}"] = category
             for c in CATEGORIES:
                 data["summary"][split][f"frauds_{c}"] = int((category == c).sum())
@@ -241,6 +288,7 @@ def print_data_summary(data):
 
 # --------------------------------------------------------------------------- models
 
+
 def make_backend(name, precision, seed, reset_inputs=False):
     if name == "estimator-exact":
         return EstimatorBackend(reset_inputs=reset_inputs)
@@ -254,6 +302,36 @@ def baseline_features(data):
     return {
         split: data[f"X_{split}"].reshape(len(data[f"X_{split}"]), -1)
         for split in SPLITS
+    }
+
+
+def classical_random_map_features(data, args):
+    """Apply a fixed seeded tanh map to each split's flattened input windows."""
+    flattened = baseline_features(data)
+    input_width = flattened["train"].shape[1]
+    map_width = (
+        input_width if args.random_map_width is None else args.random_map_width
+    )
+    if map_width < 1:
+        raise ValueError("--random-map-width must be a positive integer")
+    if args.random_map_scale <= 0 or not np.isfinite(args.random_map_scale):
+        raise ValueError("--random-map-scale must be a finite positive number")
+
+    rng = np.random.default_rng(args.seed)
+    weights = rng.normal(
+        loc=0.0,
+        scale=args.random_map_scale / np.sqrt(input_width),
+        size=(input_width, map_width),
+    )
+    bias = rng.uniform(low=-1.0, high=1.0, size=map_width)
+    mapped = {
+        split: np.tanh(X @ weights + bias)
+        for split, X in flattened.items()
+    }
+    return mapped, {
+        "classical_model": "tanh",
+        "random_map_width": map_width,
+        "random_map_scale": args.random_map_scale,
     }
 
 
@@ -335,6 +413,7 @@ def fit_and_evaluate(features, data, alpha, min_recall):
         scores[split] = split_scores
     return metrics, scores
 
+
 def add_operational_metrics(metrics, scores, data, top_k):
     """Add daily Card Precision@K to validation and test metrics."""
     for split in EVAL_SPLITS:
@@ -346,7 +425,9 @@ def add_operational_metrics(metrics, scores, data, top_k):
             top_k=top_k,
         )
 
+
 # --------------------------------------------------------------------------- results
+
 
 def data_source(args):
     if args.data == "load":
@@ -407,13 +488,23 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
         "feature_set": args.feature_set,
         "n_features": len(FEATURE_SETS[args.feature_set]),
         "window_length": args.window_length,
-        **{f"{split}_{k}": v for split in SPLITS for k, v in data["summary"][split].items()},
+        **{
+            f"{split}_{k}": v
+            for split in SPLITS
+            for k, v in data["summary"][split].items()
+        },
         "alpha": getattr(args, "alpha", ""),  # lstm has no logistic readout
-        "threshold": metrics["validation"]["threshold_used"],  # threshold is frozen and reused on test
+        "threshold": metrics["validation"][
+            "threshold_used"
+        ],  # threshold is frozen and reused on test
         "min_recall": getattr(args, "min_recall", ""),
         "top_k": getattr(args, "top_k", ""),
-        **{f"{split}_{m}": metrics[split][m] for split in EVAL_SPLITS
-           for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES) if m in metrics[split]},
+        **{
+            f"{split}_{m}": metrics[split][m]
+            for split in EVAL_SPLITS
+            for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES)
+            if m in metrics[split]
+        },
         **extra,
     }
     if args.command == "qrc":
@@ -434,6 +525,8 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
             **reservoir_info,
         )
     elif args.command == "lstm":
+        row.update(seed=args.seed)
+    elif args.command == "classical":
         row.update(seed=args.seed)
     return row
 
@@ -467,10 +560,16 @@ def save_run(args, data, metrics, scores, extra, reservoir_info=None):
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2))
     (run_dir / "metrics.json").write_text(json.dumps({**metrics, **extra}, indent=2))
-    np.savez(run_dir / "scores.npz",
-             **{f"{key}_{split}": data[f"{key}_{split}"] for split in scores
-                for key in ("y", "ids", "category") if f"{key}_{split}" in data},
-             **{f"scores_{split}": s for split, s in scores.items()})
+    np.savez(
+        run_dir / "scores.npz",
+        **{
+            f"{key}_{split}": data[f"{key}_{split}"]
+            for split in scores
+            for key in ("y", "ids", "category")
+            if f"{key}_{split}" in data
+        },
+        **{f"scores_{split}": s for split, s in scores.items()},
+    )
 
     append_summary(output_dir / "summary.csv", row)
     return run_dir
@@ -497,6 +596,7 @@ def print_metrics(metrics):
 
 
 # --------------------------------------------------------------------------- CLI
+
 
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
@@ -577,9 +677,31 @@ def build_parser():
         parents=[common, run, readout, evaluation],
         help="logistic regression on the raw (flattened) feature windows",
     )
+    classical_parser = commands.add_parser(
+        "classical",
+        parents=[common, run, readout, evaluation],
+        help="logistic readout on a fixed random tanh feature map",
+    )
+    classical_parser.add_argument(
+        "--random-map-width",
+        type=int,
+        default=None,
+        help="number of tanh random features (defaults to flattened input width)",
+    )
+    classical_parser.add_argument(
+        "--random-map-scale",
+        type=float,
+        default=1.0,
+        help="scale of tanh-map random weights",
+    )
+    classical_parser.add_argument(
+        "--seed", type=int, default=42, help="random-map seed"
+    )
 
     lstm_parser = commands.add_parser(
-        "lstm", parents=[common, run, evaluation], help="LSTM classifier on transaction windows"
+        "lstm",
+        parents=[common, run, evaluation],
+        help="LSTM classifier on transaction windows",
     )
     lstm_parser.add_argument("--hidden-size", type=int, default=32)
     lstm_parser.add_argument("--epochs", type=int, default=50)
@@ -591,7 +713,7 @@ def build_parser():
     qrc_parser = commands.add_parser(
         "qrc",
         parents=[common, run, readout, evaluation],
-        help="quantum reservoir + logistic readout"
+        help="quantum reservoir + logistic readout",
     )
     qrc_parser.add_argument(
         "--backend", choices=BACKEND_NAMES, default="estimator-exact"
@@ -663,6 +785,17 @@ def run(args, data):
     if args.command == "baseline":
         features = baseline_features(data)
         metrics, scores = fit_and_evaluate(features, data, args.alpha, args.min_recall)
+    elif args.command == "classical":
+        start = time.perf_counter()
+        features, classical_info = classical_random_map_features(data, args)
+        extra.update(classical_info)
+        metrics, scores = fit_and_evaluate(
+            features,
+            data,
+            args.alpha,
+            args.min_recall,
+        )
+        extra["classical_seconds"] = time.perf_counter() - start
     elif args.command == "lstm":
         splits = {split: (data[f"X_{split}"], data[f"y_{split}"]) for split in SPLITS}
         result = run_lstm_baseline(

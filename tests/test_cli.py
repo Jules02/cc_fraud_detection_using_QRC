@@ -270,6 +270,35 @@ def test_cli_runs_on_raw_amount_windows(tmp_path):
     assert (row["feature_set"], row["n_features"]) == ("1", "1")
 
 
+def test_classical_tanh_parser_and_random_map_features():
+    args = cli.build_parser().parse_args(
+        [
+            "classical",
+            "--random-map-width",
+            "5",
+            "--random-map-scale",
+            "0.75",
+            "--seed",
+            "44",
+        ]
+    )
+    data = {
+        f"X_{split}": np.arange(12, dtype=float).reshape(4, 1, 3)
+        for split in cli.SPLITS
+    }
+
+    features, info = cli.classical_random_map_features(data, args)
+
+    assert all(features[split].shape == (4, 5) for split in cli.SPLITS)
+    assert info == {
+        "classical_model": "tanh",
+        "random_map_width": 5,
+        "random_map_scale": 0.75,
+    }
+    repeated, _ = cli.classical_random_map_features(data, args)
+    assert np.array_equal(features["train"], repeated["train"])
+
+
 def test_evaluation_cli_arguments_are_exposed():
     args = cli.build_parser().parse_args(
         ["baseline", "--min-recall", "0.9", "--top-k", "25"]
