@@ -5,9 +5,11 @@ from qiskit.quantum_info import DensityMatrix
 from qiskit_aer.noise import NoiseModel, depolarizing_error
 
 from qrc.backends.estimator import EstimatorBackend
+from qrc.backends.numpy_backend import NumpyBackend
 from qrc.encodings import AngleEncoding, DenseAngleEncoding, ReuploadingEncoding
 from qrc.observables import build_observables
-from qrc.reservoirs import RandomCircuitReservoir
+from qrc.hamiltonians import tfim_longitudinal
+from qrc.reservoirs import HamiltonianReservoir, RandomCircuitReservoir
 
 N_IN, N_MEM, WINDOW_LENGTH, SAMPLES = 3, 2, 4, 12
 
@@ -157,3 +159,62 @@ def test_estimator_matches_reference():
     exact = exact_features(windows, encoder, reservoir, observables)
     estimated = EstimatorBackend().run_batch(windows, encoder, reservoir, observables)
     np.testing.assert_allclose(estimated, exact, atol=1e-8)
+
+
+# --------------------------------------------------------------------------- NumpyBackend
+
+@pytest.mark.parametrize("reset_inputs", [False, True])
+@pytest.mark.parametrize("encoding", ["angle", "angle-x", "dense", "reuploading"])
+def test_numpy_backend_matches_reference(reset_inputs, encoding):
+    reservoir = RandomCircuitReservoir(N_IN, N_MEM, rng=np.random.default_rng(0))
+    n_features = N_IN
+    if encoding == "angle":
+        encoder = AngleEncoding(N_IN)
+    elif encoding == "angle-x":
+        encoder = AngleEncoding(N_IN, axis="x", scaling=2.0)
+    elif encoding == "dense":
+        encoder, n_features = DenseAngleEncoding(N_IN), N_IN + 1
+    else:
+        encoder = ReuploadingEncoding(N_IN, num_layers=3, rng=1)
+    observables = build_observables("XYZ+XYZ-2body", reservoir.num_qubits)
+    windows = np.random.default_rng(2).uniform(0, 1, (SAMPLES, WINDOW_LENGTH, n_features))
+    exact = exact_features(windows, encoder, reservoir, observables, reset_inputs=reset_inputs)
+    result = NumpyBackend(reset_inputs=reset_inputs).run_batch(windows, encoder, reservoir, observables)
+    np.testing.assert_allclose(result, exact, atol=1e-10)
+
+
+def test_numpy_backend_repeats_features_like_estimator():
+    """One feature on three input qubits: both backends repeat it cyclically."""
+    reservoir = RandomCircuitReservoir(N_IN, N_MEM, rng=np.random.default_rng(0))
+    encoder, observables = AngleEncoding(N_IN), build_observables("Z+XX", reservoir.num_qubits)
+    windows = np.random.default_rng(3).uniform(0, 1, (4, WINDOW_LENGTH, 1))
+    expected = EstimatorBackend(reset_inputs=True).run_batch(windows, encoder, reservoir, observables)
+    result = NumpyBackend(reset_inputs=True).run_batch(windows, encoder, reservoir, observables)
+    np.testing.assert_allclose(result, expected, atol=1e-10)
+
+
+def test_numpy_backend_matches_estimator_on_hamiltonian_reservoir():
+    reservoir = HamiltonianReservoir(tfim_longitudinal(4, rng=0), 1, time=2.0, steps=3)
+    encoder, observables = AngleEncoding(1), build_observables("XYZ+XYZ-2body", 4)
+    windows = np.random.default_rng(4).uniform(0, 1, (6, 5, 1))
+    for reset_inputs in (False, True):
+        expected = EstimatorBackend(reset_inputs=reset_inputs).run_batch(windows, encoder, reservoir, observables)
+        result = NumpyBackend(reset_inputs=reset_inputs).run_batch(windows, encoder, reservoir, observables)
+        np.testing.assert_allclose(result, expected, atol=1e-10)
+
+
+@pytest.mark.parametrize("reset_inputs", [False, True])
+def test_numpy_backend_chunking_does_not_change_results(setup, reset_inputs):
+    windows, encoder, reservoir, observables, _ = setup
+    whole = NumpyBackend(reset_inputs=reset_inputs).run_batch(windows, encoder, reservoir, observables)
+    # a budget below one window's states forces chunks of a single window
+    chunked = NumpyBackend(reset_inputs=reset_inputs, max_chunk_bytes=1).run_batch(
+        windows, encoder, reservoir, observables)
+    np.testing.assert_allclose(chunked, whole, atol=1e-12)
+
+
+def test_numpy_backend_empty_input_and_invalid_arguments(setup):
+    windows, encoder, reservoir, observables, _ = setup
+    assert NumpyBackend().run_batch(windows[:0], encoder, reservoir, observables).shape == (0, len(observables))
+    with pytest.raises(ValueError):
+        NumpyBackend(max_chunk_bytes=0)

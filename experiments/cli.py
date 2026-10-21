@@ -45,6 +45,7 @@ import pandas as pd
 
 import qrc
 from qrc.backends.estimator import EstimatorBackend
+from qrc.backends.numpy_backend import NumpyBackend
 from qrc.datasets import load_split_files, split_dataset
 from qrc.datasets.create_dataset import add_frauds, generate_dataset
 from qrc.datasets.split_dataset import main as split_and_save_dataset
@@ -116,7 +117,7 @@ HAMILTONIAN_BUILDERS = {
     "native-exchange": native_exchange,
 }
 
-BACKEND_NAMES = ("estimator-exact", "gaussian", "shots")
+BACKEND_NAMES = ("estimator-exact", "gaussian", "shots", "numpy")
 METRIC_NAMES = (
     "average_precision",
     "roc_auc",
@@ -244,6 +245,8 @@ def print_data_summary(data):
 def make_backend(name, precision, seed, reset_inputs=False):
     if name == "estimator-exact":
         return EstimatorBackend(reset_inputs=reset_inputs)
+    if name == "numpy":
+        return NumpyBackend(reset_inputs=reset_inputs)
     return EstimatorBackend(
         precision=precision, seed=seed, sampling=name, reset_inputs=reset_inputs
     )
@@ -594,7 +597,10 @@ def build_parser():
         help="quantum reservoir + logistic readout"
     )
     qrc_parser.add_argument(
-        "--backend", choices=BACKEND_NAMES, default="estimator-exact"
+        "--backend",
+        choices=BACKEND_NAMES,
+        default="estimator-exact",
+        help="'numpy' is exact like estimator-exact, much faster for small registers (up to ~8 qubits)",
     )
     qrc_parser.add_argument(
         "--precision",

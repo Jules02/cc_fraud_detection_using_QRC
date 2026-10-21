@@ -32,7 +32,7 @@ def build_protocol(n_input_qubits=1, n_mem_qubits=3, depth=2, observables_spec="
     """The encoder → reservoir → observables stack shared by every benchmark.
 
     `backend` is one of ``experiments.cli.BACKEND_NAMES``; `precision` (the target
-    standard error per expectation value) is ignored by ``estimator-exact``.
+    standard error per expectation value) is ignored by the exact ones (``estimator-exact``, ``numpy``).
     """
     encoder = AngleEncoding(num_qubits=n_input_qubits)
     reservoir = RandomCircuitReservoir(num_input_qubits=n_input_qubits, num_mem_qubits=n_mem_qubits, depth=depth, rng=seed)
@@ -140,7 +140,7 @@ if __name__ == "__main__":
 
     for backend in args.backend:
         kwargs = dict(backend=backend, precision=args.precision)
-        print(f"\n=== {backend}" + ("" if backend == "estimator-exact" else f" (precision {args.precision})") + " ===")
+        print(f"\n=== {backend}" + ("" if backend in ("estimator-exact", "numpy") else f" (precision {args.precision})") + " ===")
         _print_table("Short-term memory", "delay", run_memory_benchmark(**kwargs), ["nmse", "capacity"])
         _print_table("Temporal parity", "order", run_parity_benchmark(**kwargs), ["nmse", "capacity", "accuracy"])
 
