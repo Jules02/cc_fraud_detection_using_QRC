@@ -1,0 +1,19 @@
+# Arm B LSTM control: same windows as results/armb/sweep1 (data/sc3_c1000_x6, raw log amount), LSTM hidden 32, early stopping on validation loss
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 1 --seed 42 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 1 --seed 43 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 1 --seed 44 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 2 --seed 42 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 2 --seed 43 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 2 --seed 44 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 3 --seed 42 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 3 --seed 43 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 3 --seed 44 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 5 --seed 42 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 5 --seed 43 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 5 --seed 44 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 8 --seed 42 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 8 --seed 43 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 8 --seed 44 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 10 --seed 42 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 10 --seed 43 --output-dir results/armb/lstm
+lstm --data load --data-dir data/sc3_c1000_x6 --feature-set 1 --window-length 10 --seed 44 --output-dir results/armb/lstm
