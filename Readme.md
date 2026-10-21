@@ -67,7 +67,8 @@ data (simulated or loaded) → feature engineering → DataProcessor → per-cus
 
 Models are fitted on **train only**. PR-AUC, ROC-AUC, F1, precision, recall, Matthews correlation
 coefficient (MCC) and balanced accuracy are reported on **validation and test**. Nothing is tuned on
-validation, except that the `lstm` command uses validation loss for early stopping.
+validation, except that the `lstm` command uses validation loss for early stopping (and the
+hyperparameter search, [below](#hyperparameter-search-optuna), selects on validation).
 
 Run `python -m experiments.cli <command> --help` to list every option.
 
@@ -139,10 +140,12 @@ python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
 | `--precision`        | `0.05`             | Target standard error per expectation value (`gaussian` / `shots`)                                                        |
 | `--n-input-qubits`   | number of features | Input qubits. With fewer qubits than features, dense angle encoding is used (see below)                                   |
 | `--n-mem-qubits`     | `2`                | Memory qubits                                                                                                             |
-| `--hamiltonian`      | `random`           | `random`, `tfim`, `tfim_longitudinal`, `tfim_native` or `native-exchange`                                                 |
-| `--topology`         | `linear`           | Hamiltonian connectivity: `linear`, `ring` or `fully_connected`; ignored for `--hamiltonian random`                       |
+| `--hamiltonian`      | `random`           | `random`, `tfim`, `tfim-longitudinal`, `tfim-native` or `native-exchange`                                                 |
+| `--topology`         | `linear`           | Hamiltonian connectivity: `linear`, `ring` or `fully-connected`; ignored for `--hamiltonian random`                       |
+| `--evolution-time`   | `1.0`              | Hamiltonian evolution time between encodings; ignored for `--hamiltonian random`                                          |
 | `--depth`            | `2`                | Reservoir circuit depth                                                                                                   |
 | `--entangler`        | `cx`               | `cx` or `cry`                                                                                                             |
+| `--encoding`         | `auto`             | `angle`, `dense` or `reupload`. `auto` picks one from the qubit count and `--encoding-layers` (see below)                 |
 | `--encoding-layers`  | `1`                | Times each transaction is encoded (data re-uploading). `1` is plain angle encoding                                        |
 | `--encoding-scaling` | `π`                | Rotation angle per unit of (scaled) feature, in each encoding layer                                                       |
 | `--reset-inputs`     | off                | Reset the input qubits before each transaction is encoded. Needs an Estimator backend (density-matrix simulation, slower) |
@@ -161,11 +164,11 @@ The Hamiltonian choice and topology are included in the run configuration and su
 
 The encodings:
 
-- **Angle encoding** (default): one feature per input qubit, as a `RY` rotation of `scaling × feature`.
-- **Dense angle encoding**: used automatically when `--n-input-qubits` is smaller than the number of
+- **Angle encoding** (`--encoding angle`): one feature per input qubit, as a `RY` rotation of `scaling × feature`.
+- **Dense angle encoding** (`--encoding dense`): used automatically when `--n-input-qubits` is smaller than the number of
   features (with `--encoding-layers 1`). Each qubit carries up to two features: one as a `RY`
   rotation, one as a `RZ` rotation. So the number of features can be at most twice `--n-input-qubits`.
-- **Re-uploading** (`--encoding-layers` > 1): the transaction is angle-encoded several times, with
+- **Re-uploading** (`--encoding reupload`, or `--encoding-layers` > 1): the transaction is angle-encoded several times, with
   fixed random `RZ` rotations in between. Each feature then enters with frequencies up to
   `layers × scaling`.
 
@@ -182,8 +185,8 @@ by side. A row records:
 
 - the run: its name, the git commit (with `-dirty` if there were uncommitted changes) and the command;
 - the data: its source, feature set, window length, and the size and fraud count of each split;
-- for `qrc`, the reservoir: backend, precision, encoding layers and scaling, qubit counts, depth,
-  entangler, input reset, observables and seed, plus the reservoir runtime;
+- for `qrc`, the reservoir: backend, precision, encoding (type, layers and scaling), qubit counts, depth,
+  entangler, input reset, observables, seed, Hamiltonian, topology and evolution time, plus the reservoir runtime;
 - for `lstm`, the training seed and training time;
 - the readout: `alpha` (empty for `lstm`), the decision threshold, and every metric (PR-AUC, ROC-AUC,
   F1, precision, recall, MCC, balanced accuracy) on validation and test.
@@ -202,6 +205,77 @@ python -m experiments.cli qrc --data load --data-dir data/sim_medium
 ```
 
 Loading saved data gives the same results as simulating it again.
+
+### Hyperparameter search (Optuna)
+
+`experiments/tune.py` searches the reservoir configuration with [Optuna](https://optuna.org)
+(multi-objective TPE sampler). Each trial is a full `qrc` run. It **maximises** the
+**validation** score (PR-AUC by default, `--metric`) and **minimises** the costs below at the
+same time. The result is a **Pareto front**: the trials that no other trial beats on every
+objective at once. The test split is never used for selection.
+
+| Cost (`--objectives`) | What it measures                                                                                                                  |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `qubits`              | Input + memory qubits                                                                                                             |
+| `depth`               | Depth of the circuit for one window (L × encoding + reservoir), transpiled to `rz`/`sx`/`x`/`cz` on a linear chain of qubits     |
+| `bases`               | Measurement bases: observables that can be read from the same shots count once (`Z` and `Z+ZZ`: 1, `XYZ`: 3)                     |
+| `shots`               | Shots per basis, ≈ 1/precision². Searched over 100 … 10,000. Needs `--backend gaussian` or `shots`                               |
+| `wall_time`           | Seconds to simulate the reservoir over all splits (machine-dependent)                                                            |
+
+By default all costs are objectives, except `shots` with an exact backend. Pass a subset with
+`--objectives qubits depth`, or `--objectives` alone for a single-objective search.
+
+```bash
+# Simplest: accuracy against circuit depth, on the small dataset
+python -m experiments.tune --study-name depth --objectives depth --size small --n-trials 30
+
+# The full multi-objective search, with sampled expectation values
+python -m experiments.tune --n-trials 100 --size medium --backend gaussian
+
+# Accuracy against hardware size only, averaged over three reservoir seeds
+python -m experiments.tune --study-name size --objectives qubits depth --seeds 1 2 3 --n-trials 50
+```
+
+The search space (`suggest_params` in `experiments/tune.py`; ranges are constants at the top of the file):
+
+| Parameter                       | Values                                                                        |
+| ------------------------------- | ----------------------------------------------------------------------------- |
+| encoding                        | `angle`, `dense`, `reupload` (`--encodings`)                                  |
+| input qubits                    | dense: ⌈F/2⌉ … F−1; angle / reupload: F … F+2 (F = number of features)        |
+| memory qubits                   | 1 … 4, with input + memory ≤ `--max-qubits` (default 12)                      |
+| encoding layers                 | 2 … 3 (reupload only)                                                          |
+| encoding scaling                | π/4 … 2π                                                                      |
+| reservoir                       | `random` or a Hamiltonian (`--hamiltonians`)                                  |
+| depth, entangler                | 1 … 4, `cx` / `cry`; random circuit only                                      |
+| topology, evolution time        | `--topologies`, 0.1 … 10 (log); Hamiltonians only                             |
+| observables                     | `Z`, `Z+ZZ`, `XYZ`, `Z+ZZ-all`                                                |
+| readout `alpha`                 | 1e-3 … 1e2 (log)                                                              |
+
+Parts of each reservoir are random but fixed: the gate angles of the random circuit and the
+couplings of the Hamiltonians. The seed picks that random draw. `--seeds 1 2 3` runs every trial
+with three draws and scores it by their average, so a configuration can't win through one lucky
+draw (each trial takes 3× longer). Without `--seeds`, every trial uses `--seed` (default `42`).
+
+With the `shots` objective, the precision is searched too.
+
+Tuner options: `--n-trials`, `--timeout`, `--study-name`, `--output-dir` (default `results/tune`),
+`--storage`, `--metric`, `--objectives`, `--seeds`, `--max-qubits`, `--encodings`, `--hamiltonians`,
+`--topologies` and `--sampler-seed`. Every other option goes to `qrc` unchanged and is fixed for the
+whole study (data, feature set, window length, backend, ...). Passing an option the search sets
+(e.g. `--n-mem-qubits`) is an error.
+
+A study is saved in `results/tune/<study-name>/`:
+
+- `study.db`: the Optuna study. Running the same command again **resumes** it. Resuming with
+  different fixed options is refused, so that all trials in a study stay comparable.
+- `runs/`: every trial as an ordinary `qrc` run, with its own `summary.csv`
+- `trials.csv`: one row per trial, with its parameters, objective values, costs (also two-qubit
+  gate count and depth, and number of observables) and validation and test metrics
+- `pareto.json`: the Pareto front, each trial with the `experiments.cli qrc` command that reproduces it
+
+At the end, the tuner prints the Pareto front as a table.
+To browse a study interactively: `pip install optuna-dashboard`, then
+`optuna-dashboard sqlite:///results/tune/qrc/study.db`.
 
 ---
 
@@ -294,7 +368,8 @@ cc_fraud_detection_using_QRC/
 │   ├── readout.py           # classical readout layers
 │   └── logger.py
 ├── experiments/             # experiment scripts (not packaged)
-│   └── cli.py               # ← the experiment runner
+│   ├── cli.py               # ← the experiment runner
+│   └── tune.py              # Optuna hyperparameter search over cli.py's qrc
 ├── docs/                    # data pipeline and feature catalog
 ├── tests/                   # pytest suite
 ├── thelab/                  # reference QRC implementation (git submodule)

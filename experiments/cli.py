@@ -111,6 +111,7 @@ HAMILTONIAN_BUILDERS = {
 }
 
 BACKEND_NAMES = ("statevector", "estimator-exact", "gaussian", "shots")
+ENCODING_NAMES = ("auto", "angle", "dense", "reupload")
 METRIC_NAMES = (
     "pr_auc",
     "roc_auc",
@@ -139,6 +140,7 @@ SUMMARY_FIELDS = (
     # reservoir (qrc only)
     "backend",
     "backend_precision",
+    "encoding",
     "encoding_layers",
     "encoding_scaling",
     "n_input_qubits",
@@ -153,6 +155,7 @@ SUMMARY_FIELDS = (
     "reservoir_seconds",
     "hamiltonian",
     "topology",
+    "evolution_time",
     # lstm only
     "training_seconds",
     # readout and metrics
@@ -243,6 +246,31 @@ def make_backend(name, precision, seed, reset_inputs=False):
     )
 
 
+def resolve_encoding(name, n_input_qubits, n_features, encoding_layers):
+    """The encoding ``auto`` stands for: re-uploading with several layers, else dense
+    angle encoding when there are fewer input qubits than features, else angle encoding."""
+    if name != "auto":
+        return name
+    if encoding_layers > 1:
+        return "reupload"
+    return "dense" if n_input_qubits < n_features else "angle"
+
+
+def make_encoder(name, n_input_qubits, args):
+    if name == "angle":
+        return AngleEncoding(num_qubits=n_input_qubits, scaling=args.encoding_scaling)
+    if name == "dense":
+        return DenseAngleEncoding(
+            num_qubits=n_input_qubits, scaling=args.encoding_scaling
+        )
+    return ReuploadingEncoding(
+        num_qubits=n_input_qubits,
+        num_layers=args.encoding_layers,
+        scaling=args.encoding_scaling,
+        rng=(args.seed, 1),
+    )
+
+
 def baseline_features(data):
     """Raw windows, flattened ``(n, L, F) → (n, L·F)``: what the readout sees without a reservoir."""
     return {
@@ -251,32 +279,20 @@ def baseline_features(data):
     }
 
 
-def qrc_features(data, args):
-    """Run the reservoir once over each split.
+def build_protocol(args):
+    """The encoder → reservoir → observables → backend stack the qrc arguments describe.
 
     Returns:
-        tuple: the reservoir outputs per split, and the resolved reservoir settings
-        (qubit counts after defaults, number of observables) for the run record.
+        tuple: the ``QRCProtocol``, and the resolved reservoir settings (qubit counts
+        after defaults, number of observables) for the run record.
     """
-    n_input_qubits = args.n_input_qubits or len(FEATURE_SETS[args.feature_set])
-    if args.encoding_layers == 1:
-        # if we have more features than qubits, we use dense angle else regular
-        if n_input_qubits < len(FEATURE_SETS[args.feature_set]):
-            encoder = DenseAngleEncoding(
-                num_qubits=n_input_qubits, scaling=args.encoding_scaling
-            )
-        else:
-            encoder = AngleEncoding(
-                num_qubits=n_input_qubits, scaling=args.encoding_scaling
-            )
-    else:
-        encoder = ReuploadingEncoding(
-            num_qubits=n_input_qubits,
-            num_layers=args.encoding_layers,
-            scaling=args.encoding_scaling,
-            rng=(args.seed, 1),
-        )
-    encoder.input_width(len(FEATURE_SETS[args.feature_set]))
+    n_features = len(FEATURE_SETS[args.feature_set])
+    n_input_qubits = args.n_input_qubits or n_features
+    encoding = resolve_encoding(
+        args.encoding, n_input_qubits, n_features, args.encoding_layers
+    )
+    encoder = make_encoder(encoding, n_input_qubits, args)
+    encoder.input_width(n_features)
     if args.hamiltonian == "random":
         reservoir = RandomCircuitReservoir(
             num_input_qubits=n_input_qubits,
@@ -293,22 +309,36 @@ def qrc_features(data, args):
             topology=topology,
             rng=args.seed,
         )
-        reservoir = HamiltonianReservoir(hamiltonian, n_input_qubits)
+        reservoir = HamiltonianReservoir(
+            hamiltonian, n_input_qubits, time=args.evolution_time
+        )
     observables = build_observables(args.observables, reservoir.num_qubits)
     backend = make_backend(args.backend, args.precision, args.seed, args.reset_inputs)
     protocol = QRCProtocol(encoder, reservoir, observables, backend)
-
-    features = {}
-    for split in SPLITS:
-        print(f"running {args.backend} on {split} ...", flush=True)
-        features[split] = protocol.run(data[f"X_{split}"])
     reservoir_info = {
+        "encoding": encoding,
         "n_input_qubits": n_input_qubits,
         "n_qubits": reservoir.num_qubits,
         "n_observables": len(observables),
         "hamiltonian": args.hamiltonian,
         "topology": topology.value if topology else topology,
+        "evolution_time": args.evolution_time if topology else "",
     }
+    return protocol, reservoir_info
+
+
+def qrc_features(data, args):
+    """Run the reservoir once over each split.
+
+    Returns:
+        tuple: the reservoir outputs per split, and the resolved reservoir settings
+        for the run record (see `build_protocol`).
+    """
+    protocol, reservoir_info = build_protocol(args)
+    features = {}
+    for split in SPLITS:
+        print(f"running {args.backend} on {split} ...", flush=True)
+        features[split] = protocol.run(data[f"X_{split}"])
     return features, reservoir_info
 
 
@@ -572,6 +602,13 @@ def build_parser():
         help="defaults to the number of features in --feature-set",
     )
     qrc_parser.add_argument(
+        "--encoding",
+        choices=ENCODING_NAMES,
+        default="auto",
+        help="input encoding; 'auto' picks dense angle encoding with fewer input qubits "
+        "than features, re-uploading with --encoding-layers > 1, else angle encoding",
+    )
+    qrc_parser.add_argument(
         "--encoding-layers",
         type=int,
         default=1,
@@ -595,6 +632,12 @@ def build_parser():
         choices=tuple(topology.value for topology in HamiltonianTopology),
         default=HamiltonianTopology.LINEAR.value,
         help="Hamiltonian connectivity (used unless --hamiltonian=random)",
+    )
+    qrc_parser.add_argument(
+        "--evolution-time",
+        type=float,
+        default=1.0,
+        help="Hamiltonian evolution time between encodings (unused for --hamiltonian=random)",
     )
     qrc_parser.add_argument("--depth", type=int, default=2)
     qrc_parser.add_argument("--entangler", choices=("cx", "cry"), default="cx")
