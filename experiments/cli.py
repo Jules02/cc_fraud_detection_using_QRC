@@ -28,6 +28,7 @@ Examples:
     python -m experiments.cli qrc --size medium --backend estimator-exact
     python -m experiments.cli qrc --hamiltonian tfim --topology ring
     python -m experiments.cli qrc --data load --data-dir data --backend gaussian --precision 0.05
+    python -m experiments.cli qrc --size small --backend spinpulse --noise pink --t2 50000 --precision 0
 
 To run many configurations on the same prepared data, see ``experiments/sweep.py``.
 """
@@ -46,6 +47,13 @@ import pandas as pd
 import qrc
 from qrc.backends.estimator import EstimatorBackend
 from qrc.backends.numpy_backend import NumpyBackend
+from qrc.backends.spinpulse import (
+    DD_MODES,
+    NOISE_TYPES,
+    PULSE_SHAPES,
+    SpinPulseBackend,
+    SpinPulseConfig,
+)
 from qrc.datasets import load_split_files, split_dataset
 from qrc.datasets.create_dataset import add_frauds, generate_dataset
 from qrc.datasets.split_dataset import main as split_and_save_dataset
@@ -117,7 +125,7 @@ HAMILTONIAN_BUILDERS = {
     "native-exchange": native_exchange,
 }
 
-BACKEND_NAMES = ("estimator-exact", "gaussian", "shots", "numpy")
+BACKEND_NAMES = ("estimator-exact", "gaussian", "shots", "numpy", "spinpulse")
 METRIC_NAMES = (
     "average_precision",
     "roc_auc",
@@ -242,13 +250,31 @@ def print_data_summary(data):
 
 # --------------------------------------------------------------------------- models
 
-def make_backend(name, precision, seed, reset_inputs=False):
+def make_backend(name, precision, seed, reset_inputs=False, spinpulse=None):
     if name == "estimator-exact":
         return EstimatorBackend(reset_inputs=reset_inputs)
     if name == "numpy":
         return NumpyBackend(reset_inputs=reset_inputs)
+    if name == "spinpulse":
+        config = spinpulse or SpinPulseConfig(precision=precision, seed=seed)
+        return SpinPulseBackend(config, reset_inputs=reset_inputs)
     return EstimatorBackend(
         precision=precision, seed=seed, sampling=name, reset_inputs=reset_inputs
+    )
+
+
+def spinpulse_config(args):
+    """SpinPulse hardware and noise settings from the qrc --noise/--t2/... options."""
+    return SpinPulseConfig(
+        noise_type=args.noise,
+        T2S=args.t2,
+        TJS=args.tj,
+        only_idle=args.only_idle,
+        dynamical_decoupling=args.dd,
+        pulse_shape=args.pulse_shape,
+        noise_samples=args.noise_samples,
+        precision=args.precision,
+        seed=args.seed,
     )
 
 
@@ -304,13 +330,26 @@ def qrc_features(data, args):
         )
         reservoir = HamiltonianReservoir(hamiltonian, n_input_qubits)
     observables = build_observables(args.observables, reservoir.num_qubits)
-    backend = make_backend(args.backend, args.precision, args.seed, args.reset_inputs)
+    backend = make_backend(
+        args.backend,
+        args.precision,
+        args.seed,
+        args.reset_inputs,
+        spinpulse_config(args) if args.backend == "spinpulse" else None,
+    )
     protocol = QRCProtocol(encoder, reservoir, observables, backend)
 
     features = {}
     for split in SPLITS:
         print(f"running {args.backend} on {split} ...", flush=True)
         features[split] = protocol.run(data[f"X_{split}"])
+        stderr = getattr(backend, "last_stderr", None)  # only SpinPulse sets it
+        if stderr is not None:
+            print(
+                f"  noise-sampling std. error per feature: "
+                f"mean {stderr.mean():.4f}, max {stderr.max():.4f}",
+                flush=True,
+            )
     reservoir_info = {
         "n_input_qubits": n_input_qubits,
         "n_qubits": reservoir.num_qubits,
@@ -424,7 +463,9 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
             backend=args.backend,
             # only the sampled backends use it
             backend_precision=(
-                args.precision if args.backend in ("gaussian", "shots") else ""
+                args.precision
+                if args.backend in ("gaussian", "shots", "spinpulse")
+                else ""
             ),
             encoding_layers=args.encoding_layers,
             encoding_scaling=args.encoding_scaling,
@@ -606,7 +647,8 @@ def build_parser():
         "--precision",
         type=float,
         default=0.05,
-        help="target std. error of each expectation value (gaussian/shots; shots ~ 1/precision**2)",
+        help="target std. error of each expectation value (gaussian/shots/spinpulse; "
+        "shots ~ 1/precision**2; 0 = exact, spinpulse only)",
     )
     qrc_parser.add_argument(
         "--n-input-qubits",
@@ -650,6 +692,53 @@ def build_parser():
     qrc_parser.add_argument(
         "--seed", type=int, default=42, help="reservoir and sampling seed"
     )
+
+    spin = qrc_parser.add_argument_group(
+        "spinpulse backend (only with --backend spinpulse)"
+    )
+    spin.add_argument(
+        "--noise",
+        choices=NOISE_TYPES,
+        default="pink",
+        help="qubit-frequency noise: none, white, pink (1/f) or quasistatic",
+    )
+    spin.add_argument(
+        "--t2",
+        type=float,
+        default=100.0,
+        help="qubit dephasing time T2* in SpinPulse time units (shorter = stronger noise); "
+        "compare it with the window's pulse duration, ~15,000 units for 9 qubits",
+    )
+    spin.add_argument(
+        "--tj",
+        type=float,
+        default=None,
+        help="dephasing time of the exchange coupling; off by default",
+    )
+    spin.add_argument(
+        "--only-idle",
+        action="store_true",
+        help="apply the frequency noise to idle qubits only",
+    )
+    spin.add_argument(
+        "--dd",
+        choices=DD_MODES,
+        default="none",
+        help="dynamical decoupling on idle qubits: none, spin-echo or full-drive",
+    )
+    spin.add_argument(
+        "--pulse-shape",
+        choices=PULSE_SHAPES,
+        default="gaussian",
+        help="envelope of the control pulses",
+    )
+    spin.add_argument(
+        "--noise-samples",
+        type=int,
+        default=20,
+        help="noise realizations averaged per window (accuracy vs. run time)",
+    )
+
     return parser
 
 
