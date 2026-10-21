@@ -195,7 +195,7 @@ def test_multiple_card_precision_top_ks_match_individual_calls():
     results = card_precision_top_ks(y, scores, customers, timestamps, top_ks=top_ks)
 
     for top_k in top_ks:
-        expected = card_precision_top_k(y, scores, customers, timestamps, top_ks=top_ks)
+        expected = card_precision_top_k(y, scores, customers, timestamps, top_k=top_k)
 
         assert results[top_k] == pytest.approx(expected)
 
