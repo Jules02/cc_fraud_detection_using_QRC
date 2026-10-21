@@ -236,20 +236,22 @@ python -m experiments.tune --n-trials 100 --size medium --backend gaussian
 python -m experiments.tune --study-name size --objectives qubits depth --seeds 1 2 3 --n-trials 50
 ```
 
-The search space (`suggest_params` in `experiments/tune.py`; ranges are constants at the top of the file):
+The search space (`suggest_params` in `experiments/tune.py`; ranges are constants at the top of the file).
+The default is the value `experiments.cli qrc` uses when the option is not given, i.e. without tuning:
 
-| Parameter                       | Values                                                                        |
-| ------------------------------- | ----------------------------------------------------------------------------- |
-| encoding                        | `angle`, `dense`, `reupload` (`--encodings`)                                  |
-| input qubits                    | dense: ⌈F/2⌉ … F−1; angle / reupload: F … F+2 (F = number of features)        |
-| memory qubits                   | 1 … 4, with input + memory ≤ `--max-qubits` (default 12)                      |
-| encoding layers                 | 2 … 3 (reupload only)                                                          |
-| encoding scaling                | π/4 … 2π                                                                      |
-| reservoir                       | `random` or a Hamiltonian (`--hamiltonians`)                                  |
-| depth, entangler                | 1 … 4, `cx` / `cry`; random circuit only                                      |
-| topology, evolution time        | `--topologies`, 0.1 … 10 (log); Hamiltonians only                             |
-| observables                     | `Z`, `Z+ZZ`, `XYZ`, `Z+ZZ-all`                                                |
-| readout `alpha`                 | 1e-3 … 1e2 (log)                                                              |
+| Parameter                       | Values searched                                                               | Default (`cli qrc`)                    |
+| ------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------- |
+| encoding                        | `angle`, `dense`, `reupload` (`--encodings`)                                  | `auto` (angle with one qubit per feature) |
+| input qubits                    | dense: ⌈F/2⌉ … F−1; angle / reupload: F … F+2 (F = number of features)        | F                                      |
+| memory qubits                   | 1 … 4, with input + memory ≤ `--max-qubits` (default 12)                      | 2                                      |
+| encoding layers                 | 2 … 3 (reupload only)                                                          | 1                                      |
+| encoding scaling                | π/4 … 2π                                                                      | π                                      |
+| reservoir                       | `random` or a Hamiltonian (`--hamiltonians`)                                  | `random`                               |
+| depth, entangler                | 1 … 4, `cx` / `cry`; random circuit only                                      | 2, `cx`                                |
+| topology, evolution time        | `--topologies`, 0.1 … 10 (log); Hamiltonians only                             | `linear`, 1.0                          |
+| observables                     | `Z`, `Z+ZZ`, `XYZ`, `Z+ZZ-all`                                                | `Z`                                    |
+| readout `alpha`                 | 1e-3 … 1e2 (log)                                                              | 1.0                                    |
+| precision                       | 0.1, 0.05, 0.02, 0.01 (≈100 … 10,000 shots); only with the `shots` objective  | 0.05 (≈400 shots)                      |
 
 Parts of each reservoir are random but fixed: the gate angles of the random circuit and the
 couplings of the Hamiltonians. The seed picks that random draw. `--seeds 1 2 3` runs every trial
