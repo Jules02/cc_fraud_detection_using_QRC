@@ -16,6 +16,42 @@ from qrc.reservoirs import Reservoir
 SAMPLING_MODES = ("gaussian", "shots")
 
 
+def window_circuit(
+    encoder: Encoding,
+    reservoir: Reservoir,
+    window_length: int,
+    input_width: int,
+    reset_inputs: bool = False,
+) -> QuantumCircuit:
+    """The parametrized circuit for a window of `window_length` transactions, with
+    `input_width` parameters per transaction. Parameters are ordered transaction by
+    transaction.
+    """
+    n_in = reservoir.num_input_qubits
+    theta = ParameterVector("x", window_length * input_width)
+    reservoir_circuit = reservoir.circuit()
+    circuit = QuantumCircuit(reservoir.num_qubits)
+
+    for t in range(window_length):
+        # 1. Discard and re-prepare the input qubits if enabled.
+        if reset_inputs and t > 0:
+            circuit.reset(range(n_in))
+
+        # 2. Encode all features for this transaction.
+        start = t * input_width
+        end = (t + 1) * input_width
+        circuit.compose(
+            encoder.encode(theta[start:end]),
+            qubits=range(encoder.num_qubits),
+            inplace=True,
+        )
+
+        # 3. Evolve the whole register.
+        circuit.compose(reservoir_circuit, inplace=True)
+
+    return circuit
+
+
 class EstimatorBackend(Backend):
     """Runs the QRC circuits through a Qiskit Estimator primitive.
 
@@ -105,33 +141,10 @@ class EstimatorBackend(Backend):
         window_length: int,
         input_width: int,
     ) -> QuantumCircuit:
-        """Build the parametrized circuit for a window of `window_length`
-        transactions, with `input_width` parameters per transaction.
-        Parameters are ordered transaction by transaction.
-        """
-        n_in = reservoir.num_input_qubits
-        theta = ParameterVector("x", window_length * input_width)
-        reservoir_circuit = reservoir.circuit()
-        circuit = QuantumCircuit(reservoir.num_qubits)
-
-        for t in range(window_length):
-            # 1. Discard and re-prepare the input qubits if enabled.
-            if self.reset_inputs and t > 0:
-                circuit.reset(range(n_in))
-
-            # 2. Encode all features for this transaction.
-            start = t * input_width
-            end = (t + 1) * input_width
-            circuit.compose(
-                encoder.encode(theta[start:end]),
-                qubits=range(encoder.num_qubits),
-                inplace=True,
-            )
-
-            # 3. Evolve the whole register.
-            circuit.compose(reservoir_circuit, inplace=True)
-
-        return circuit
+        """See `window_circuit`."""
+        return window_circuit(
+            encoder, reservoir, window_length, input_width, self.reset_inputs
+        )
 
     def run_batch(
         self,
