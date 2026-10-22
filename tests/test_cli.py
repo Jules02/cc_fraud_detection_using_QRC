@@ -21,6 +21,7 @@ def _metrics(run_dir):
     [
         ["baseline"],
         ["lstm", "--epochs", "2", "--hidden-size", "4", "--batch-size", "1024"],
+        ["esn", "--n-units", "8"],
         ["qrc", "--backend", "estimator-exact"],
     ],
 )

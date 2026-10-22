@@ -15,6 +15,7 @@ Commands:
     prepare   data preparation only; prints split shapes and fraud counts.
     baseline  logistic regression fitted on the raw (flattened) feature windows instead of the reservoir outputs.
     lstm      recurrent neural-network baseline fitted on the feature windows.
+    esn       echo state network: a fixed random classical reservoir + the same logistic readout as qrc.
     qrc       run the quantum reservoir, then fit the logistic readout.
 
 Models are fitted on train only. Validation loss selects the LSTM checkpoint;
@@ -25,6 +26,7 @@ Examples:
     python -m experiments.cli prepare --size small --save-data data/sim_small
     python -m experiments.cli baseline --size medium
     python -m experiments.cli lstm --size medium
+    python -m experiments.cli esn --size medium --n-units 50 --spectral-radius 0.9
     python -m experiments.cli qrc --size medium --backend estimator-exact
     python -m experiments.cli qrc --hamiltonian tfim --topology ring
     python -m experiments.cli qrc --data load --data-dir data --backend gaussian --precision 0.05
@@ -75,6 +77,7 @@ from qrc.protocol import QRCProtocol
 from qrc.readout import ClassicalReadout
 from qrc.reservoirs import HamiltonianReservoir, RandomCircuitReservoir
 from qrc.sequences import SPLITS, window_by_customer_id
+from qrc.baselines.esn import EchoStateNetwork
 from experiments.lstm_baseline import run_lstm_baseline
 
 logger = get_logger(__name__)
@@ -165,6 +168,8 @@ SUMMARY_FIELDS = (
     "topology",
     # lstm only
     "training_seconds",
+    # esn only (also uses seed and reservoir_seconds)
+    "n_units", "spectral_radius", "leak_rate", "input_scaling", "bias_scaling", "density",
     # readout and metrics
     "alpha", "threshold", "min_recall", "top_k",
     *(f"{split}_{m}" for split in EVAL_SPLITS for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES)),
@@ -360,6 +365,21 @@ def qrc_features(data, args):
     return features, reservoir_info
 
 
+def esn_features(data, args):
+    """Run the echo state network once over each split (final reservoir state per window)."""
+    esn = EchoStateNetwork(
+        input_size=len(FEATURE_SETS[args.feature_set]),
+        n_units=args.n_units,
+        spectral_radius=args.spectral_radius,
+        leak_rate=args.leak_rate,
+        input_scaling=args.input_scaling,
+        bias_scaling=args.bias_scaling,
+        density=args.density,
+        rng=args.seed,
+    )
+    return {split: esn.run(data[f"X_{split}"]) for split in SPLITS}
+
+
 def fit_and_evaluate(features, data, alpha, min_recall):
     """Fit the readout on train, evaluate on validation and test."""
     readout = ClassicalReadout(alpha=alpha)
@@ -479,6 +499,16 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
         )
     elif args.command == "lstm":
         row.update(seed=args.seed)
+    elif args.command == "esn":
+        row.update(
+            n_units=args.n_units,
+            spectral_radius=args.spectral_radius,
+            leak_rate=args.leak_rate,
+            input_scaling=args.input_scaling,
+            bias_scaling=args.bias_scaling,
+            density=args.density,
+            seed=args.seed,
+        )
     return row
 
 
@@ -632,6 +662,23 @@ def build_parser():
     lstm_parser.add_argument("--patience", type=int, default=8)
     lstm_parser.add_argument("--seed", type=int, default=42)
 
+    esn_parser = commands.add_parser(
+        "esn",
+        parents=[common, run, readout, evaluation],
+        help="echo state network (classical reservoir) + logistic readout",
+    )
+    esn_parser.add_argument("--n-units", type=int, default=50, help="reservoir neurons")
+    esn_parser.add_argument(
+        "--spectral-radius", type=float, default=0.9, help="largest |eigenvalue| of the recurrent weights"
+    )
+    esn_parser.add_argument(
+        "--leak-rate", type=float, default=1.0, help="state update rate in (0, 1]; smaller = slower, longer memory"
+    )
+    esn_parser.add_argument("--input-scaling", type=float, default=1.0, help="range of the input weights")
+    esn_parser.add_argument("--bias-scaling", type=float, default=0.2, help="range of the neuron biases")
+    esn_parser.add_argument("--density", type=float, default=1.0, help="fraction of non-zero recurrent weights")
+    esn_parser.add_argument("--seed", type=int, default=42, help="reservoir seed")
+
     qrc_parser = commands.add_parser(
         "qrc",
         parents=[common, run, readout, evaluation],
@@ -772,6 +819,11 @@ def run(args, data):
         )
         metrics, scores = result["metrics"], result["scores"]
         extra["training_seconds"] = result["seconds"]
+    elif args.command == "esn":
+        start = time.perf_counter()
+        features = esn_features(data, args)
+        extra["reservoir_seconds"] = time.perf_counter() - start
+        metrics, scores = fit_and_evaluate(features, data, args.alpha, args.min_recall)
     else:
         start = time.perf_counter()
         features, reservoir_info = qrc_features(data, args)

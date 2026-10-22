@@ -57,6 +57,7 @@ python -m experiments.cli <command> [options]
 | `prepare`  | Data preparation only. Prints the split shapes and fraud counts.                                         |
 | `baseline` | Classical control: the logistic readout fitted directly on the raw (flattened) windows.                  |
 | `lstm`     | Classical control: an LSTM trained on the windows; validation loss picks the best epoch (needs PyTorch). |
+| `esn`      | Classical reservoir control: a fixed random echo state network on each window, then the same logistic readout as `qrc`. |
 | `qrc`      | Runs the quantum reservoir on each window, then fits the same logistic readout on its outputs.           |
 
 All commands run the same data preparation:
@@ -79,6 +80,9 @@ python -m experiments.cli baseline --size medium
 
 # LSTM baseline on a small-sized simulated dataset
 python -m experiments.cli lstm --size small --epochs 10
+
+# Echo state network (classical reservoir) baseline
+python -m experiments.cli esn --size small --n-units 50 --spectral-radius 0.9
 
 # QRC with the exact Qiskit Estimator
 python -m experiments.cli qrc --size medium --backend estimator-exact
@@ -113,7 +117,7 @@ python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
 | `--feature-set 1\|7\|10\|15`   | `7`        | `1`: the raw log amount only. `7`, `10`, `15`: selected by the feature analysis, each extends the previous ([list](docs/data_pipeline.md#4-feature-analysis-and-the-feature-sets)) |
 | `--window-length`             | `3`        | Number of transactions per customer window                                                                                                           |
 
-**Readout and output**, for `baseline` and `qrc` (`--output-dir` also applies to `lstm`):
+**Readout and output**, for `baseline`, `esn` and `qrc` (`--output-dir` also applies to `lstm`):
 
 | Option         | Default        | Meaning                                |
 | -------------- | -------------- | -------------------------------------- |
@@ -130,6 +134,19 @@ python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
 | `--learning-rate` | `1e-3`  | Adam learning rate                                         |
 | `--patience`      | `8`     | Epochs without validation-loss improvement before stopping |
 | `--seed`          | `42`    | Training seed                                              |
+
+**Echo state network**, for `esn` only. Each window starts from a zero state (like the reset-window QRC) and the
+state after its last transaction is the readout input:
+
+| Option              | Default | Meaning                                                             |
+| ------------------- | ------- | ------------------------------------------------------------------- |
+| `--n-units`         | `50`    | Reservoir neurons                                                   |
+| `--spectral-radius` | `0.9`   | Largest absolute eigenvalue of the recurrent weights (memory decay) |
+| `--leak-rate`       | `1.0`   | State update rate in (0, 1]; smaller is slower, with longer memory  |
+| `--input-scaling`   | `1.0`   | Input weights are uniform in `[-s, s]`                              |
+| `--bias-scaling`    | `0.2`   | Neuron biases are uniform in `[-s, s]`                              |
+| `--density`         | `1.0`   | Fraction of non-zero recurrent weights                              |
+| `--seed`            | `42`    | Reservoir seed                                                      |
 
 **Reservoir and backend**, for `qrc` only:
 
@@ -281,7 +298,7 @@ cc_fraud_detection_using_QRC/
 │   ├── analysis/            # exploration, feature scoring and selection, plots
 │   ├── benchmarks/          # synthetic tasks: memory, parity, NARMA10
 │   ├── backends/            # Qiskit Aer Estimator, spin-pulse
-│   ├── baselines/           # classical baseline models (LSTM)
+│   ├── baselines/           # classical baseline models (LSTM, echo state network)
 │   ├── processing.py        # final model input: feature selection, imputation, scaling
 │   ├── sequences.py         # 2D features → (n, window_length, features) per-customer windows
 │   ├── encodings.py         # input encodings (AngleEncoding, ...)
