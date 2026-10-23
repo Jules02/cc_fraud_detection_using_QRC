@@ -15,6 +15,7 @@ Commands:
     prepare   data preparation only; prints split shapes and fraud counts.
     baseline  logistic regression fitted on the raw (flattened) feature windows instead of the reservoir outputs.
     lstm      recurrent neural-network baseline fitted on the feature windows.
+    esn       echo state network: a fixed random classical reservoir + the same logistic readout as qrc.
     qrc       run the quantum reservoir, then fit the logistic readout.
 
 Models are fitted on train only. Validation loss selects the LSTM checkpoint;
@@ -25,6 +26,7 @@ Examples:
     python -m experiments.cli prepare --size small --save-data data/sim_small
     python -m experiments.cli baseline --size medium
     python -m experiments.cli lstm --size medium
+    python -m experiments.cli esn --size medium --n-units 50 --spectral-radius 0.9
     python -m experiments.cli qrc --size medium --backend estimator-exact
     python -m experiments.cli qrc --hamiltonian tfim --topology ring
     python -m experiments.cli qrc --data load --data-dir data --backend gaussian --precision 0.05
@@ -75,6 +77,7 @@ from qrc.protocol import QRCProtocol
 from qrc.readout import ClassicalReadout
 from qrc.reservoirs import HamiltonianReservoir, RandomCircuitReservoir
 from qrc.sequences import SPLITS, window_by_customer_id
+from qrc.baselines.esn import EchoStateNetwork
 from experiments.lstm_baseline import run_lstm_baseline
 
 logger = get_logger(__name__)
@@ -126,6 +129,7 @@ HAMILTONIAN_BUILDERS = {
 }
 
 BACKEND_NAMES = ("estimator-exact", "gaussian", "shots", "numpy", "spinpulse")
+ENCODING_NAMES = ("auto", "angle", "dense", "reupload")
 METRIC_NAMES = (
     "average_precision",
     "roc_auc",
@@ -149,6 +153,7 @@ SUMMARY_FIELDS = (
     # reservoir (qrc only)
     "backend",
     "backend_precision",
+    "encoding",
     "encoding_layers",
     "encoding_scaling",
     "n_input_qubits",
@@ -163,8 +168,11 @@ SUMMARY_FIELDS = (
     "reservoir_seconds",
     "hamiltonian",
     "topology",
+    "evolution_time",
     # lstm only
     "training_seconds",
+    # esn only (also uses seed and reservoir_seconds)
+    "n_units", "spectral_radius", "leak_rate", "input_scaling", "bias_scaling", "density",
     # readout and metrics
     "alpha", "threshold", "min_recall", "top_k",
     *(f"{split}_{m}" for split in EVAL_SPLITS for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES)),
@@ -263,6 +271,31 @@ def make_backend(name, precision, seed, reset_inputs=False, spinpulse=None):
     )
 
 
+def resolve_encoding(name, n_input_qubits, n_features, encoding_layers):
+    """The encoding ``auto`` stands for: re-uploading with several layers, else dense
+    angle encoding when there are fewer input qubits than features, else angle encoding."""
+    if name != "auto":
+        return name
+    if encoding_layers > 1:
+        return "reupload"
+    return "dense" if n_input_qubits < n_features else "angle"
+
+
+def make_encoder(name, n_input_qubits, args):
+    if name == "angle":
+        return AngleEncoding(num_qubits=n_input_qubits, scaling=args.encoding_scaling)
+    if name == "dense":
+        return DenseAngleEncoding(
+            num_qubits=n_input_qubits, scaling=args.encoding_scaling
+        )
+    return ReuploadingEncoding(
+        num_qubits=n_input_qubits,
+        num_layers=args.encoding_layers,
+        scaling=args.encoding_scaling,
+        rng=(args.seed, 1),
+    )
+
+
 def spinpulse_config(args):
     """SpinPulse hardware and noise settings from the qrc --noise/--t2/... options."""
     return SpinPulseConfig(
@@ -286,32 +319,20 @@ def baseline_features(data):
     }
 
 
-def qrc_features(data, args):
-    """Run the reservoir once over each split.
+def build_protocol(args):
+    """The encoder → reservoir → observables → backend stack the qrc arguments describe.
 
     Returns:
-        tuple: the reservoir outputs per split, and the resolved reservoir settings
-        (qubit counts after defaults, number of observables) for the run record.
+        tuple: the ``QRCProtocol``, and the resolved reservoir settings (qubit counts
+        after defaults, number of observables) for the run record.
     """
-    n_input_qubits = args.n_input_qubits or len(FEATURE_SETS[args.feature_set])
-    if args.encoding_layers == 1:
-        # if we have more features than qubits, we use dense angle else regular
-        if n_input_qubits < len(FEATURE_SETS[args.feature_set]):
-            encoder = DenseAngleEncoding(
-                num_qubits=n_input_qubits, scaling=args.encoding_scaling
-            )
-        else:
-            encoder = AngleEncoding(
-                num_qubits=n_input_qubits, scaling=args.encoding_scaling
-            )
-    else:
-        encoder = ReuploadingEncoding(
-            num_qubits=n_input_qubits,
-            num_layers=args.encoding_layers,
-            scaling=args.encoding_scaling,
-            rng=(args.seed, 1),
-        )
-    encoder.input_width(len(FEATURE_SETS[args.feature_set]))
+    n_features = len(FEATURE_SETS[args.feature_set])
+    n_input_qubits = args.n_input_qubits or n_features
+    encoding = resolve_encoding(
+        args.encoding, n_input_qubits, n_features, args.encoding_layers
+    )
+    encoder = make_encoder(encoding, n_input_qubits, args)
+    encoder.input_width(n_features)
     if args.hamiltonian == "random":
         reservoir = RandomCircuitReservoir(
             num_input_qubits=n_input_qubits,
@@ -328,7 +349,9 @@ def qrc_features(data, args):
             topology=topology,
             rng=args.seed,
         )
-        reservoir = HamiltonianReservoir(hamiltonian, n_input_qubits)
+        reservoir = HamiltonianReservoir(
+            hamiltonian, n_input_qubits, time=args.evolution_time
+        )
     observables = build_observables(args.observables, reservoir.num_qubits)
     backend = make_backend(
         args.backend,
@@ -338,26 +361,53 @@ def qrc_features(data, args):
         spinpulse_config(args) if args.backend == "spinpulse" else None,
     )
     protocol = QRCProtocol(encoder, reservoir, observables, backend)
+    reservoir_info = {
+        "encoding": encoding,
+        "n_input_qubits": n_input_qubits,
+        "n_qubits": reservoir.num_qubits,
+        "n_observables": len(observables),
+        "hamiltonian": args.hamiltonian,
+        "topology": topology.value if topology else topology,
+        "evolution_time": args.evolution_time if topology else "",
+    }
+    return protocol, reservoir_info
 
+
+def qrc_features(data, args):
+    """Run the reservoir once over each split.
+
+    Returns:
+        tuple: the reservoir outputs per split, and the resolved reservoir settings
+        for the run record (see `build_protocol`).
+    """
+    protocol, reservoir_info = build_protocol(args)
     features = {}
     for split in SPLITS:
         print(f"running {args.backend} on {split} ...", flush=True)
         features[split] = protocol.run(data[f"X_{split}"])
-        stderr = getattr(backend, "last_stderr", None)  # only SpinPulse sets it
+        stderr = getattr(protocol.backend, "last_stderr", None)  # only SpinPulse sets it
         if stderr is not None:
             print(
                 f"  noise-sampling std. error per feature: "
                 f"mean {stderr.mean():.4f}, max {stderr.max():.4f}",
                 flush=True,
             )
-    reservoir_info = {
-        "n_input_qubits": n_input_qubits,
-        "n_qubits": reservoir.num_qubits,
-        "n_observables": len(observables),
-        "hamiltonian": args.hamiltonian,
-        "topology": topology.value if topology else topology,
-    }
     return features, reservoir_info
+
+
+def esn_features(data, args):
+    """Run the echo state network once over each split (final reservoir state per window)."""
+    esn = EchoStateNetwork(
+        input_size=len(FEATURE_SETS[args.feature_set]),
+        n_units=args.n_units,
+        spectral_radius=args.spectral_radius,
+        leak_rate=args.leak_rate,
+        input_scaling=args.input_scaling,
+        bias_scaling=args.bias_scaling,
+        density=args.density,
+        rng=args.seed,
+    )
+    return {split: esn.run(data[f"X_{split}"]) for split in SPLITS}
 
 
 def fit_and_evaluate(features, data, alpha, min_recall):
@@ -387,6 +437,20 @@ def add_operational_metrics(metrics, scores, data, top_k):
             data[f"timestamps_{split}"],
             top_k=top_k,
         )
+
+
+def add_derived_metrics(metrics, scores, data, top_k):
+    """Add Card Precision@K and, when the data carries fraud categories, the per-category AP."""
+    add_operational_metrics(metrics, scores, data, top_k)
+    for split, split_scores in scores.items():
+        if f"category_{split}" in data:
+            metrics[split].update(
+                category_metrics(
+                    data[f"y_{split}"],
+                    split_scores,
+                    data[f"category_{split}"],
+                )
+            )
 
 # --------------------------------------------------------------------------- results
 
@@ -479,6 +543,16 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
         )
     elif args.command == "lstm":
         row.update(seed=args.seed)
+    elif args.command == "esn":
+        row.update(
+            n_units=args.n_units,
+            spectral_radius=args.spectral_radius,
+            leak_rate=args.leak_rate,
+            input_scaling=args.input_scaling,
+            bias_scaling=args.bias_scaling,
+            density=args.density,
+            seed=args.seed,
+        )
     return row
 
 
@@ -632,6 +706,23 @@ def build_parser():
     lstm_parser.add_argument("--patience", type=int, default=8)
     lstm_parser.add_argument("--seed", type=int, default=42)
 
+    esn_parser = commands.add_parser(
+        "esn",
+        parents=[common, run, readout, evaluation],
+        help="echo state network (classical reservoir) + logistic readout",
+    )
+    esn_parser.add_argument("--n-units", type=int, default=50, help="reservoir neurons")
+    esn_parser.add_argument(
+        "--spectral-radius", type=float, default=0.9, help="largest |eigenvalue| of the recurrent weights"
+    )
+    esn_parser.add_argument(
+        "--leak-rate", type=float, default=1.0, help="state update rate in (0, 1]; smaller = slower, longer memory"
+    )
+    esn_parser.add_argument("--input-scaling", type=float, default=1.0, help="range of the input weights")
+    esn_parser.add_argument("--bias-scaling", type=float, default=0.2, help="range of the neuron biases")
+    esn_parser.add_argument("--density", type=float, default=1.0, help="fraction of non-zero recurrent weights")
+    esn_parser.add_argument("--seed", type=int, default=42, help="reservoir seed")
+
     qrc_parser = commands.add_parser(
         "qrc",
         parents=[common, run, readout, evaluation],
@@ -657,6 +748,13 @@ def build_parser():
         help="defaults to the number of features in --feature-set",
     )
     qrc_parser.add_argument(
+        "--encoding",
+        choices=ENCODING_NAMES,
+        default="auto",
+        help="input encoding; 'auto' picks dense angle encoding with fewer input qubits "
+        "than features, re-uploading with --encoding-layers > 1, else angle encoding",
+    )
+    qrc_parser.add_argument(
         "--encoding-layers",
         type=int,
         default=1,
@@ -680,6 +778,12 @@ def build_parser():
         choices=tuple(topology.value for topology in HamiltonianTopology),
         default=HamiltonianTopology.LINEAR.value,
         help="Hamiltonian connectivity (used unless --hamiltonian=random)",
+    )
+    qrc_parser.add_argument(
+        "--evolution-time",
+        type=float,
+        default=1.0,
+        help="Hamiltonian evolution time between encodings (unused for --hamiltonian=random)",
     )
     qrc_parser.add_argument("--depth", type=int, default=2)
     qrc_parser.add_argument("--entangler", choices=("cx", "cry"), default="cx")
@@ -772,6 +876,11 @@ def run(args, data):
         )
         metrics, scores = result["metrics"], result["scores"]
         extra["training_seconds"] = result["seconds"]
+    elif args.command == "esn":
+        start = time.perf_counter()
+        features = esn_features(data, args)
+        extra["reservoir_seconds"] = time.perf_counter() - start
+        metrics, scores = fit_and_evaluate(features, data, args.alpha, args.min_recall)
     else:
         start = time.perf_counter()
         features, reservoir_info = qrc_features(data, args)
@@ -783,22 +892,7 @@ def run(args, data):
             args.min_recall,
         )
 
-    add_operational_metrics(
-        metrics,
-        scores,
-        data,
-        args.top_k,
-    )
-
-    for split, split_scores in scores.items():
-        if f"category_{split}" in data:
-            metrics[split].update(
-                category_metrics(
-                    data[f"y_{split}"],
-                    split_scores,
-                    data[f"category_{split}"],
-                )
-            )
+    add_derived_metrics(metrics, scores, data, args.top_k)
     run_dir = save_run(args, data, metrics, scores, extra, reservoir_info)
     print_metrics(metrics)
     print(f"\nResults saved to {run_dir}")

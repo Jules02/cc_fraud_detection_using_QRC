@@ -21,6 +21,7 @@ def _metrics(run_dir):
     [
         ["baseline"],
         ["lstm", "--epochs", "2", "--hidden-size", "4", "--batch-size", "1024"],
+        ["esn", "--n-units", "8"],
         ["qrc", "--backend", "estimator-exact"],
     ],
 )
@@ -130,6 +131,7 @@ def test_qrc_cli_selects_dense_encoding_when_qubits_are_fewer_than_features(
     class RecordingProtocol:
         def __init__(self, encoder, reservoir, observables, backend):
             protocol_args.append((encoder, reservoir, observables, backend))
+            self.backend = backend
 
         def run(self, windows):
             return np.zeros((len(windows), 1))
@@ -215,6 +217,7 @@ def test_qrc_cli_selects_hamiltonian_and_topology(monkeypatch):
     class RecordingProtocol:
         def __init__(self, *protocol_args):
             captured.append(protocol_args[1])
+            self.backend = protocol_args[3]
 
         def run(self, windows):
             return np.zeros((len(windows), 1))
@@ -242,6 +245,7 @@ def test_qrc_cli_keeps_random_reservoir_as_default(monkeypatch):
     class RecordingProtocol:
         def __init__(self, *protocol_args):
             captured.append(protocol_args[1])
+            self.backend = protocol_args[3]
 
         def run(self, windows):
             return np.zeros((len(windows), 1))
