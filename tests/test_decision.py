@@ -1,5 +1,6 @@
 #%%
 import numpy as np
+import pandas as pd
 import pytest
 
 from qrc.decision import (
@@ -138,7 +139,7 @@ def test_card_precision_top_k_groups_multiple_transactions_from_same_card():
     assert result == pytest.approx(0.75)
 
 #%%
-def test_card_precision_top_k_uses_available_cards_when_fewer_than_k():
+def test_card_precision_top_k_divides_by_k_when_fewer_than_k_cards():
     y = np.array([1, 0])
     scores = np.array([0.9, 0.8])
     customers = np.array(["A", "B"])
@@ -152,7 +153,8 @@ def test_card_precision_top_k_uses_available_cards_when_fewer_than_k():
 
     result = card_precision_top_k(y, scores, customers, timestamps, top_k=10)
 
-    assert result == pytest.approx(0.5)
+    # K is the review capacity: one fraud among 10 slots
+    assert result == pytest.approx(0.1)
 
 #%%
 def test_card_precision_top_k_is_deterministic_for_tied_scores():
@@ -225,10 +227,83 @@ def test_card_precision_multiple_k_expected_values():
     assert results[1] == pytest.approx(1.0)
     assert results[2] == pytest.approx(0.75)
 
-    # There are 3 cards on each day.
-    # Day 1: A fraud, B genuine, C fraud -> 2/3
-    # Day 2: D fraud, E fraud, A genuine -> 2/3
-    assert results[10] == pytest.approx(2 / 3)
+    # There are 3 cards on each day, all reviewed; the denominator stays 10.
+    # Day 1: A fraud, B genuine, C fraud -> 2/10 (A and C are blocked)
+    # Day 2: D fraud, E fraud, A removed -> 2/10
+    assert results[10] == pytest.approx(0.2)
+
+#%%
+def test_card_precision_removes_detected_compromised_cards():
+    # Card A is fraudulent and top-ranked on both days.
+    y = np.array([1, 0, 1, 0])
+    scores = np.array([0.9, 0.5, 0.9, 0.5])
+    customers = np.array(["A", "B", "A", "B"])
+    timestamps = np.array(
+        ["2026-01-01", "2026-01-01", "2026-01-02", "2026-01-02"],
+        dtype="datetime64[D]",
+    )
+
+    # Day 1 catches A; on day 2 A is already blocked, so B (genuine) is reviewed.
+    assert card_precision_top_k(
+        y, scores, customers, timestamps, top_k=1
+    ) == pytest.approx(0.5)
+    assert card_precision_top_k(
+        y, scores, customers, timestamps, top_k=1, remove_detected=False
+    ) == pytest.approx(1.0)
+
+#%%
+def test_card_precision_genuine_cards_are_not_removed():
+    # A is reviewed on day 1 but genuine, so it stays in the ranking on day 2.
+    y = np.array([0, 1, 1])
+    scores = np.array([0.9, 0.5, 0.9])
+    customers = np.array(["A", "B", "A"])
+    timestamps = np.array(
+        ["2026-01-01", "2026-01-01", "2026-01-02"],
+        dtype="datetime64[D]",
+    )
+
+    result = card_precision_top_k(y, scores, customers, timestamps, top_k=1)
+
+    assert result == pytest.approx(0.5)
+
+#%%
+def _handbook_card_precision_top_k(y, scores, customers, days, top_k):
+    """Direct port of the Fraud Detection Handbook's ``card_precision_top_k``."""
+    df = pd.DataFrame(
+        {"predictions": scores, "CUSTOMER_ID": customers, "TX_FRAUD": y, "day": days}
+    )
+    detected, daily = [], []
+    for day in sorted(df["day"].unique()):
+        df_day = df[df["day"] == day][["predictions", "CUSTOMER_ID", "TX_FRAUD"]]
+        df_day = df_day[~df_day.CUSTOMER_ID.isin(detected)]
+        df_day = (
+            df_day.groupby("CUSTOMER_ID").max()
+            .sort_values(by="predictions", ascending=False)
+            .reset_index(drop=False)
+        )
+        top = df_day.head(top_k)
+        found = list(top[top.TX_FRAUD == 1].CUSTOMER_ID)
+        daily.append(len(found) / top_k)
+        detected.extend(found)
+    return np.mean(daily)
+
+#%%
+@pytest.mark.parametrize("top_k", [1, 3, 10, 40])
+def test_card_precision_matches_handbook_implementation(top_k):
+    rng = np.random.default_rng(0)
+    n = 2000
+    customers = rng.integers(0, 60, n)
+    days = rng.integers(0, 15, n)
+    y = (rng.random(n) < 0.08).astype(int)
+    # continuous scores: no ties, so the handbook's tie order does not matter
+    scores = rng.random(n) + 0.5 * y
+    timestamps = np.datetime64("2026-01-01") + days.astype("timedelta64[D]")
+
+    result = card_precision_top_k(y, scores, customers, timestamps, top_k=top_k)
+
+    assert result == pytest.approx(
+        _handbook_card_precision_top_k(y, scores, customers, days, top_k)
+    )
 
 #%%
 def test_card_precision_empty_input_returns_nan():

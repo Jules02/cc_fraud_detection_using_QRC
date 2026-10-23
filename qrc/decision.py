@@ -296,7 +296,7 @@ def _daily_card_ranking(
     if len(y_true) == 0:
         empty = np.array([], dtype=np.int64)
 
-        return (empty, empty, empty)
+        return (empty, empty, empty, empty)
 
     day_codes, _ = pd.factorize(days, sort=True)
 
@@ -369,6 +369,10 @@ def _daily_card_ranking(
         copy=False,
     )
 
+    ranked_customers = card_customers[
+        ranking_order
+    ]
+
     # Find daily ranking boundaries.
     day_start_mask = np.r_[
         True,
@@ -385,12 +389,11 @@ def _daily_card_ranking(
 
     day_sizes = (day_ends - day_starts)
 
-    cumulative_frauds = np.cumsum(ranked_labels, dtype=np.int64)
-
     return (
         day_starts,
         day_sizes,
-        cumulative_frauds,
+        ranked_labels,
+        ranked_customers,
     )
 
 #%%
@@ -444,12 +447,11 @@ def card_precision_top_ks(
     timestamps: np.ndarray,
     *,
     top_ks: Iterable[int],
+    remove_detected: bool = True,
 ):
     """
-    Return mean daily Card Precision@K
-
-    The transaction aggregation and daily ranking are calculated once and
-    reused for every requested K.
+    Return mean daily Card Precision@K, as defined in the Fraud Detection Handbook
+    (Le Borgne et al., "Precision top-k metrics")
 
     Transactions are first collapsed to one observation per
     ``(day, customer)``:
@@ -457,19 +459,23 @@ def card_precision_top_ks(
     - card label = maximum fraud label that day
     - card score = maximum fraud score that day
 
-    Cards are ranked by descending score within each day.
+    Cards are ranked by descending score within each day, and the top K are
+    reviewed. Daily precision is:
+        fraudulent cards among the top K // K
 
-    For each K, daily precision is:
-        fraudulent cards among reviewed cards // number of cards reviewed
+    K is the daily review capacity, so the denominator stays K on days with
+    fewer than K cards.
 
-    When fewer than K cards exist on a day, precision is calculated over
-    the cards actually available that day.
+    With ``remove_detected`` (the handbook default), a fraudulent card found in
+    the top K is blocked: it is dropped from every later day, so the same
+    compromised card cannot be counted again. Removal depends on K, so each K
+    is evaluated separately.
 
     The final Card Precision@K is the mean of the daily precision values.
     """
     top_ks = _validate_top_ks(top_ks)
 
-    (day_starts, day_sizes, cumulative_frauds) = _daily_card_ranking(
+    (day_starts, day_sizes, ranked_labels, ranked_customers) = _daily_card_ranking(
         y_true,
         scores,
         customer_ids,
@@ -482,49 +488,29 @@ def card_precision_top_ks(
             for top_k in top_ks
         }
 
-    # Fraud count before the first ranked card of each day.
-    fraud_before_day = np.zeros(
-        len(day_starts),
-        dtype=np.int64,
-    )
+    n_customers = int(ranked_customers.max()) + 1
+    results = {}
 
-    has_previous = (day_starts > 0)
+    for top_k in top_ks:
+        detected = np.zeros(n_customers, dtype=bool)
+        daily_precision = np.empty(len(day_starts))
 
-    fraud_before_day[has_previous] = cumulative_frauds[
-        day_starts[has_previous] - 1
-    ]
+        for day, (start, size) in enumerate(zip(day_starts, day_sizes)):
+            customers = ranked_customers[start:start + size]
+            labels = ranked_labels[start:start + size]
 
-    reviewed_count = np.minimum(
-        top_ks[:, None],
-        day_sizes[None, :],
-    )
+            remaining = ~detected[customers]
+            reviewed = customers[remaining][:top_k]
+            reviewed_labels = labels[remaining][:top_k]
 
-    # Last ranked card included for each K/day pair.
-    last_reviewed_index = (
-            day_starts[None, :]
-            + reviewed_count
-            - 1
-    )
+            daily_precision[day] = reviewed_labels.sum() / top_k
 
-    fraudulent_cards = (
-            cumulative_frauds[
-                last_reviewed_index
-            ]
-            - fraud_before_day[None, :]
-    )
+            if remove_detected:
+                detected[reviewed[reviewed_labels == 1]] = True
 
-    daily_precision = (fraudulent_cards / reviewed_count)
+        results[int(top_k)] = float(daily_precision.mean())
 
-    mean_precision = daily_precision.mean(axis=1)
-
-    return {
-        int(top_k): float(value)
-        for top_k, value in zip(
-            top_ks,
-            mean_precision,
-            strict=True,
-        )
-    }
+    return results
 
 #%%
 def card_precision_top_k(
@@ -534,9 +520,10 @@ def card_precision_top_k(
     timestamps: np.ndarray,
     *,
     top_k: int,
+    remove_detected: bool = True,
 ):
     """
-    Return mean daily Card Precision@K
+    Return mean daily Card Precision@K (see `card_precision_top_ks`)
     """
     result = card_precision_top_ks(
         y_true,
@@ -544,6 +531,7 @@ def card_precision_top_k(
         customer_ids,
         timestamps,
         top_ks=[top_k],
+        remove_detected=remove_detected,
     )
 
     return result[int(top_k)]
