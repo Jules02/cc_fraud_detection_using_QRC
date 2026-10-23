@@ -107,10 +107,12 @@ class HamiltonianReservoir(Reservoir):
     """`1.` to `4.` Trotterised free evolution under a fixed Hamiltonian.
 
     The register evolves for a fixed `time` between encodings; on gate-based
-    hardware that evolution is approximated by `steps` Trotter repetitions.
+    hardware that evolution is approximated by `steps` Trotter repetitions. A single
+    step is a poor default: for the TFIM models with input reset it makes the
+    features invariant under u -> 1 - u of the window history.
     """
 
-    def __init__(self, hamiltonian, num_input_qubits, time=1.0, steps=1):
+    def __init__(self, hamiltonian, num_input_qubits, time=1.0, steps=2):
         super().__init__(num_input_qubits, hamiltonian.num_qubits - num_input_qubits)
         self.name = hamiltonian.name
         self.hamiltonian = hamiltonian

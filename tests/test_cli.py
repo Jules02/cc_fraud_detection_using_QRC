@@ -236,6 +236,39 @@ def test_qrc_cli_selects_hamiltonian_and_topology(monkeypatch):
     assert len(captured[0].hamiltonian.params) == 8
     assert reservoir_info["hamiltonian"] == "tfim"
     assert reservoir_info["topology"] == "ring"
+    assert captured[0].steps == 2
+    assert reservoir_info["trotter_steps"] == 2
+
+
+def test_trotter_steps_flag_reaches_reservoir():
+    args = cli.build_parser().parse_args(
+        ["qrc", "--hamiltonian", "tfim", "--trotter-steps", "4"]
+    )
+    protocol, reservoir_info = cli.build_protocol(args)
+
+    assert protocol.reservoir.steps == 4
+    assert reservoir_info["trotter_steps"] == 4
+
+
+def test_append_summary_upgrades_old_header(tmp_path):
+    """Rows written before a column was added keep their values under the new header."""
+    path = tmp_path / "summary.csv"
+    old_fields = [f for f in cli.SUMMARY_FIELDS if f != "trotter_steps"]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=old_fields)
+        writer.writeheader()
+        writer.writerow({"evolution_time": "1.0", "seed": "7"})
+
+    cli.append_summary(path, {"evolution_time": "0.5", "trotter_steps": 2, "seed": "8"})
+
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    assert tuple(reader.fieldnames) == cli.SUMMARY_FIELDS
+    assert [(r["evolution_time"], r["trotter_steps"], r["seed"]) for r in rows] == [
+        ("1.0", "", "7"),
+        ("0.5", "2", "8"),
+    ]
 
 
 def test_qrc_cli_keeps_random_reservoir_as_default(monkeypatch):

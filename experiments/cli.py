@@ -169,6 +169,7 @@ SUMMARY_FIELDS = (
     "hamiltonian",
     "topology",
     "evolution_time",
+    "trotter_steps",
     # lstm only
     "training_seconds",
     # esn only (also uses seed and reservoir_seconds)
@@ -350,7 +351,10 @@ def build_protocol(args):
             rng=args.seed,
         )
         reservoir = HamiltonianReservoir(
-            hamiltonian, n_input_qubits, time=args.evolution_time
+            hamiltonian,
+            n_input_qubits,
+            time=args.evolution_time,
+            steps=args.trotter_steps,
         )
     observables = build_observables(args.observables, reservoir.num_qubits)
     backend = make_backend(
@@ -369,6 +373,7 @@ def build_protocol(args):
         "hamiltonian": args.hamiltonian,
         "topology": topology.value if topology else topology,
         "evolution_time": args.evolution_time if topology else "",
+        "trotter_steps": args.trotter_steps if topology else "",
     }
     return protocol, reservoir_info
 
@@ -557,8 +562,21 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
 
 
 def append_summary(summary_path, row):
-    """Append `row` to summary.csv, writing the header if the file is new."""
+    """Append `row` to summary.csv, writing the header if the file is new.
+
+    A file written with an older set of columns is first rewritten under the
+    current header, so new columns never shift the values of later rows.
+    """
     write_header = not summary_path.exists()
+    if not write_header:
+        with open(summary_path, newline="") as f:
+            reader = csv.DictReader(f)
+            if tuple(reader.fieldnames or ()) != SUMMARY_FIELDS:
+                old_rows = list(reader)
+                with open(summary_path, "w", newline="") as out:
+                    writer = csv.DictWriter(out, fieldnames=SUMMARY_FIELDS, restval="")
+                    writer.writeheader()
+                    writer.writerows(old_rows)
     with open(summary_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, restval="")
         if write_header:
@@ -784,6 +802,13 @@ def build_parser():
         type=float,
         default=1.0,
         help="Hamiltonian evolution time between encodings (unused for --hamiltonian=random)",
+    )
+    qrc_parser.add_argument(
+        "--trotter-steps",
+        type=int,
+        default=2,
+        help="Trotter steps per evolution (unused for --hamiltonian=random). One step "
+        "makes reset tfim/tfim-longitudinal blind to u -> 1-u, so the default is 2",
     )
     qrc_parser.add_argument("--depth", type=int, default=2)
     qrc_parser.add_argument("--entangler", choices=("cx", "cry"), default="cx")

@@ -160,6 +160,7 @@ state after its last transaction is the readout input:
 | `--hamiltonian`      | `random`           | `random`, `tfim`, `tfim-longitudinal`, `tfim-native` or `native-exchange`                                                 |
 | `--topology`         | `linear`           | Hamiltonian connectivity: `linear`, `ring` or `fully-connected`; ignored for `--hamiltonian random`                       |
 | `--evolution-time`   | `1.0`              | Hamiltonian evolution time between encodings; ignored for `--hamiltonian random`                                          |
+| `--trotter-steps`    | `2`                | Trotter steps per evolution; ignored for `--hamiltonian random`. One step makes reset `tfim` blind to u → 1−u             |
 | `--depth`            | `2`                | Reservoir circuit depth                                                                                                   |
 | `--entangler`        | `cx`               | `cx` or `cry`                                                                                                             |
 | `--encoding`         | `auto`             | `angle`, `dense` or `reupload`. `auto` picks one from the qubit count and `--encoding-layers` (see below)                 |
@@ -202,7 +203,7 @@ by side. A row records:
 - the run: its name, the git commit (with `-dirty` if there were uncommitted changes) and the command;
 - the data: its source, feature set, window length, and the size and fraud count of each split;
 - for `qrc`, the reservoir: backend, precision, encoding (type, layers and scaling), qubit counts, depth,
-  entangler, input reset, observables, seed, Hamiltonian, topology and evolution time, plus the reservoir runtime;
+  entangler, input reset, observables, seed, Hamiltonian, topology, evolution time and Trotter steps, plus the reservoir runtime;
 - for `lstm`, the training seed and training time;
 - the readout: `alpha` (empty for `lstm`), the decision threshold, and every metric (average precision, ROC-AUC,
   F1, precision, recall, MCC, balanced accuracy) on validation and test.
