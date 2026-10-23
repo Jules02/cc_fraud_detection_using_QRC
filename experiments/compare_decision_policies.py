@@ -27,7 +27,7 @@ from sklearn.metrics import (
 )
 
 from experiments import cli
-from experiments.lstm_baseline import run_lstm_baseline
+from qrc.baselines.lstm import run_lstm_baseline
 from qrc.decision import card_precision_top_ks, select_thresholds_min_fp
 from qrc.readout import ClassicalReadout
 

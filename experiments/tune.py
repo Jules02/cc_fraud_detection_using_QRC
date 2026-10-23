@@ -46,7 +46,7 @@ ENCODING_LAYERS = (2, 3)  # re-uploading only
 ENCODING_SCALING = (np.pi / 4, 2 * np.pi)
 DEPTH = (1, 4)  # random circuit only
 EVOLUTION_TIME = (0.1, 10.0)  # Hamiltonians only, log scale
-ALPHA = (1e-3, 1e2)  # log scale
+ALPHA = (1e-1, 1e5)  # log scale
 OBSERVABLES = ("Z", "Z+ZZ", "XYZ", "Z+ZZ-all")
 PRECISIONS = (0.1, 0.05, 0.02, 0.01)  # shots objective only: ~100, 400, 2500, 10000 shots
 

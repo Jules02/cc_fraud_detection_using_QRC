@@ -78,7 +78,7 @@ from qrc.readout import ClassicalReadout
 from qrc.reservoirs import HamiltonianReservoir, RandomCircuitReservoir
 from qrc.sequences import SPLITS, window_by_customer_id
 from qrc.baselines.esn import EchoStateNetwork
-from experiments.lstm_baseline import run_lstm_baseline
+from qrc.baselines.lstm import run_lstm_baseline
 
 logger = get_logger(__name__)
 
