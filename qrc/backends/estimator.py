@@ -70,10 +70,14 @@ class EstimatorBackend(Backend):
 
             * ``"gaussian"``: Aer's ``EstimatorV2``. Computes the exact expectation values
               of the (noisy) circuit and adds Gaussian noise of width ``precision``.
-              Fast, but no measurement is actually sampled.
+              Fast, but no measurement is actually sampled. The noise is drawn here
+              rather than by Aer, which re-seeds its generator for every PUB and would
+              repeat the same draws every ``batch_size`` windows and on every call.
             * ``"shots"``: Qiskit's ``BackendEstimatorV2`` on ``AerSimulator``. Appends
               the measurement bases, samples ``~1/precision**2`` shots per circuit and
               averages the counts, as on hardware. Slower, but a genuine shot simulation.
+              Each job gets a fresh simulator seed, so separate calls (e.g. the train,
+              validation and test splits) do not share their random draws.
         batch_size (int): number of samples (whole windows) per PUB. Windows are never
             split across PUBs. Aer slows down on very large PUBs, so large datasets are
             split into several PUBs, all submitted in a single job.
@@ -110,6 +114,8 @@ class EstimatorBackend(Backend):
         self.seed = seed
         self.sampling = sampling
         self.reset_inputs = reset_inputs
+        # one stream for the whole lifetime of the backend: every call draws new noise
+        self._rng = np.random.default_rng(seed)
 
         backend_options = {}
         if noise_model is not None:
@@ -121,7 +127,7 @@ class EstimatorBackend(Backend):
             run_options = {} if seed is None else {"seed_simulator": seed}
             self.estimator = AerEstimator(
                 options={
-                    "default_precision": precision,
+                    "default_precision": 0.0,
                     "backend_options": backend_options,
                     "run_options": run_options,
                 }
@@ -175,5 +181,10 @@ class EstimatorBackend(Backend):
             (circuit, observables, parameter_values[start : start + self.batch_size])
             for start in range(0, samples, self.batch_size)
         ]
+        if self._backend is not None:
+            self._backend.set_options(seed_simulator=int(self._rng.integers(2**31)))
         job = self.estimator.run(pubs)
-        return np.concatenate([np.asarray(result.data.evs) for result in job.result()])
+        evs = np.concatenate([np.asarray(result.data.evs) for result in job.result()])
+        if self.sampling == "gaussian" and self.precision > 0:
+            evs = evs + self._rng.normal(0.0, self.precision, evs.shape)
+        return evs

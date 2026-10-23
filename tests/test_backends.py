@@ -85,6 +85,19 @@ def test_seed_is_reproducible(setup, sampling):
 
 
 @pytest.mark.parametrize("sampling", ["gaussian", "shots"])
+def test_sampling_noise_never_repeats(setup, sampling):
+    """Identical windows get independent noise across PUBs and across calls (e.g. the
+    train and test splits); Aer alone re-seeds every PUB and repeats its draws."""
+    windows, encoder, reservoir, observables, _ = setup
+    same = np.repeat(windows[:1], 2 * SAMPLES, axis=0)
+    backend = EstimatorBackend(precision=0.05, sampling=sampling, seed=7, batch_size=SAMPLES)
+    first = backend.run_batch(same, encoder, reservoir, observables)
+    second = backend.run_batch(same, encoder, reservoir, observables)
+    assert not np.allclose(first[:SAMPLES], first[SAMPLES:])
+    assert not np.allclose(first, second)
+
+
+@pytest.mark.parametrize("sampling", ["gaussian", "shots"])
 def test_noise_model_changes_the_features(setup, sampling):
     noisy = run(EstimatorBackend(precision=0.02 if sampling == "shots" else 0.0, sampling=sampling,
                                  noise_model=depolarizing_noise_model(), seed=1), setup)
