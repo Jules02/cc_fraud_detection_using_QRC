@@ -14,6 +14,7 @@ Data sources (``--data``):
 Commands:
     prepare   data preparation only; prints split shapes and fraud counts.
     baseline  logistic regression fitted on the raw (flattened) feature windows instead of the reservoir outputs.
+    classical fixed random feature map (tanh or RFF) plus logistic readout.
     lstm      recurrent neural-network baseline fitted on the feature windows.
     qrc       run the quantum reservoir, then fit the logistic readout.
 
@@ -24,6 +25,7 @@ validation and test metrics are reported. Each run is saved to
 Examples:
     python -m experiments.cli prepare --size small --save-data data/sim_small
     python -m experiments.cli baseline --size medium
+    python -m experiments.cli classical --random-map-method rff --feature-set 20 --window-length 1
     python -m experiments.cli lstm --size medium
     python -m experiments.cli qrc --size medium --backend estimator-exact
     python -m experiments.cli qrc --hamiltonian tfim --topology ring
@@ -35,7 +37,9 @@ To run many configurations on the same prepared data, see ``experiments/sweep.py
 import argparse
 import csv
 import json
+import os
 import subprocess
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -66,7 +70,12 @@ from qrc.protocol import QRCProtocol
 from qrc.readout import ClassicalReadout
 from qrc.reservoirs import HamiltonianReservoir, RandomCircuitReservoir
 from qrc.sequences import SPLITS, window_by_customer_id
+
 from experiments.lstm_baseline import run_lstm_baseline
+from experiments.classical_random_maps import (
+    SUPPORTED_RANDOM_MAPS,
+    make_random_map,
+)
 
 logger = get_logger(__name__)
 
@@ -185,6 +194,8 @@ SUMMARY_FIELDS = (
     "classical_model",
     "random_map_width",
     "random_map_scale",
+    "random_map_seed",
+    "rff_gamma",
     "classical_seconds",
     # lstm only
     "training_seconds",
@@ -306,33 +317,34 @@ def baseline_features(data):
 
 
 def classical_random_map_features(data, args):
-    """Apply a fixed seeded tanh map to each split's flattened input windows."""
+    """Apply a fixed seeded classical random feature map to each split."""
     flattened = baseline_features(data)
     input_width = flattened["train"].shape[1]
-    map_width = (
-        input_width if args.random_map_width is None else args.random_map_width
-    )
-    if map_width < 1:
-        raise ValueError("--random-map-width must be a positive integer")
-    if args.random_map_scale <= 0 or not np.isfinite(args.random_map_scale):
-        raise ValueError("--random-map-scale must be a finite positive number")
 
-    rng = np.random.default_rng(args.seed)
-    weights = rng.normal(
-        loc=0.0,
-        scale=args.random_map_scale / np.sqrt(input_width),
-        size=(input_width, map_width),
+    map_width = input_width if args.random_map_width is None else args.random_map_width
+
+    method = args.random_map_method
+
+    if method not in SUPPORTED_RANDOM_MAPS:
+        raise ValueError(
+            f"Unknown random map {method!r}. " f"Choose from {SUPPORTED_RANDOM_MAPS}."
+        )
+
+    random_map = make_random_map(
+        method,
+        input_width=input_width,
+        map_width=map_width,
+        scale=args.random_map_scale,
+        seed=args.seed,
     )
-    bias = rng.uniform(low=-1.0, high=1.0, size=map_width)
+    random_map.fit(flattened["train"])
+
     mapped = {
-        split: np.tanh(X @ weights + bias)
+        split: random_map.transform(X)
         for split, X in flattened.items()
     }
-    return mapped, {
-        "classical_model": "tanh",
-        "random_map_width": map_width,
-        "random_map_scale": args.random_map_scale,
-    }
+
+    return mapped, random_map.get_metadata()
 
 
 def qrc_features(data, args):
@@ -532,13 +544,41 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
 
 
 def append_summary(summary_path, row):
-    """Append `row` to summary.csv, writing the header if the file is new."""
-    write_header = not summary_path.exists()
-    with open(summary_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, restval="")
-        if write_header:
+    """Append `row`, extending an existing CSV header when new fields appear."""
+    existing_rows = []
+    existing_fields = []
+    if summary_path.exists():
+        with open(summary_path, newline="") as f:
+            reader = csv.DictReader(f)
+            existing_fields = reader.fieldnames or []
+            existing_rows = list(reader)
+
+    fieldnames = list(dict.fromkeys((*existing_fields, *SUMMARY_FIELDS, *row.keys())))
+    needs_rewrite = not existing_fields or any(
+        field not in existing_fields for field in fieldnames
+    )
+
+    if not needs_rewrite:
+        with open(summary_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, restval="")
+            writer.writerow(row)
+        return
+
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", newline="", encoding="utf-8", dir=summary_path.parent, delete=False
+        ) as f:
+            temp_path = f.name
+            writer = csv.DictWriter(f, fieldnames=fieldnames, restval="")
             writer.writeheader()
-        writer.writerow(row)
+            writer.writerows(existing_rows)
+            writer.writerow(row)
+        os.replace(temp_path, summary_path)
+    finally:
+        if temp_path is not None and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def save_run(args, data, metrics, scores, extra, reservoir_info=None):
@@ -680,19 +720,25 @@ def build_parser():
     classical_parser = commands.add_parser(
         "classical",
         parents=[common, run, readout, evaluation],
-        help="logistic readout on a fixed random tanh feature map",
+        help="logistic readout on a fixed classical random feature map",
+    )
+    classical_parser.add_argument(
+        "--random-map-method",
+        choices=SUPPORTED_RANDOM_MAPS,
+        default="tanh",
+        help="random feature map type",
     )
     classical_parser.add_argument(
         "--random-map-width",
         type=int,
         default=None,
-        help="number of tanh random features (defaults to flattened input width)",
+        help="number of random-map features (defaults to flattened input width)",
     )
     classical_parser.add_argument(
         "--random-map-scale",
         type=float,
         default=1.0,
-        help="scale of tanh-map random weights",
+        help="scale of the random-map weights",
     )
     classical_parser.add_argument(
         "--seed", type=int, default=42, help="random-map seed"

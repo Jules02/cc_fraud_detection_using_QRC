@@ -1,149 +1,369 @@
-"""Run the benchmark tasks through the QRC pipeline.
+"""Run benchmark tasks through the QRC pipeline.
 
-    python -m experiments.run_benchmarks
-    python -m experiments.run_benchmarks --backend shots --precision 0.01
+Examples:
+    python -m experiments.run_benchmarks --tasks ipc
+    python -m experiments.run_benchmarks --tasks ipc --hamiltonian tfim
+    python -m experiments.run_benchmarks --tasks ipc --hamiltonian native-exchange
+    python -m experiments.run_benchmarks --tasks ipc --hamiltonian random
+    python -m experiments.run_benchmarks --tasks ipc --backend shots --precision 0.01
 
-Every backend of ``experiments.cli`` is available. By default the benchmarks run
-once per backend, so the finite-precision ones (``gaussian``, ``shots``) can be
-compared against the exact one: the measured features carry ~``precision`` noise,
-which the readout cannot remove.
-
-The memory and parity benchmarks sweep one task parameter (the delay, the
-order). The reservoir is run once per sweep: with a fixed seed every task in the
-sweep sees the same windows, only the target changes, so each one just fits a
-new readout. NARMA10 is a single task.
+The selected reservoir is either a random circuit or a Hamiltonian reservoir.
+The exact estimator is the reference; gaussian and shots provide finite-
+precision expectation-value estimates.
 """
 
 import argparse
+import json
 
 import numpy as np
 
-from experiments.cli import BACKEND_NAMES, make_backend
-from qrc.benchmarks import MemoryTask, NARMA10Task, ParityTask
+from experiments.cli import (
+    BACKEND_NAMES,
+    HAMILTONIAN_BUILDERS,
+    make_backend,
+)
+from qrc.benchmarks import IPCTask, MemoryTask, NARMA10Task, ParityTask
 from qrc.encodings import AngleEncoding
 from qrc.observables import build_observables
 from qrc.protocol import QRCProtocol
 from qrc.readout import RegressionReadout
-from qrc.reservoirs import RandomCircuitReservoir
+from qrc.reservoirs import HamiltonianReservoir, RandomCircuitReservoir
 
 
-def build_protocol(n_input_qubits=1, n_mem_qubits=3, depth=2, observables_spec="Z+ZZ",
-                   reset_inputs=True, backend="estimator-exact", precision=0.05, seed=42):
-    """The encoder → reservoir → observables stack shared by every benchmark.
-
-    `backend` is one of ``experiments.cli.BACKEND_NAMES``; `precision` (the target
-    standard error per expectation value) is ignored by ``estimator-exact``.
-    """
+def build_protocol(
+    n_input_qubits=1,
+    n_mem_qubits=3,
+    depth=2,
+    observables_spec="Z+ZZ",
+    reset_inputs=True,
+    backend="estimator-exact",
+    precision=0.05,
+    seed=42,
+    hamiltonian="random",
+):
+    """Build the encoder -> reservoir -> observables protocol."""
     encoder = AngleEncoding(num_qubits=n_input_qubits)
-    reservoir = RandomCircuitReservoir(num_input_qubits=n_input_qubits, num_mem_qubits=n_mem_qubits, depth=depth, rng=seed)
-    observables = build_observables(observables_spec, reservoir.num_qubits)
-    return QRCProtocol(encoder, reservoir, observables, make_backend(backend, precision, seed, reset_inputs))
+    num_qubits = n_input_qubits + n_mem_qubits
+
+    if hamiltonian == "random":
+        reservoir = RandomCircuitReservoir(
+            num_input_qubits=n_input_qubits,
+            num_mem_qubits=n_mem_qubits,
+            depth=depth,
+            rng=seed,
+        )
+    else:
+        if hamiltonian not in HAMILTONIAN_BUILDERS:
+            valid = ["random", *HAMILTONIAN_BUILDERS.keys()]
+            raise ValueError(
+                f"Unknown Hamiltonian {hamiltonian!r}. " f"Choose from: {valid}"
+            )
+
+        hamiltonian_operator = HAMILTONIAN_BUILDERS[hamiltonian](num_qubits)
+
+        reservoir = HamiltonianReservoir(
+            hamiltonian=hamiltonian_operator,
+            num_input_qubits=n_input_qubits,
+            time=1.0,
+            steps=2,
+        )
+
+    observables = build_observables(
+        observables_spec,
+        reservoir.num_qubits,
+    )
+
+    return QRCProtocol(
+        encoder,
+        reservoir,
+        observables,
+        make_backend(backend, precision, seed, reset_inputs),
+    )
 
 
 def _score_sweep(protocol, tasks, alpha):
-    """Run the reservoir on the (shared) windows once, then fit one readout per task.
-
-    Returns:
-        list of ``(metrics, y_test, y_pred)``, one per task, in order.
-    """
+    """Run the reservoir once, then fit a readout for each task."""
     (X_train, _), (X_test, _) = tasks[0].generate()
+
     train_outputs = protocol.run(X_train)
     test_outputs = protocol.run(X_test)
 
     scores = []
+
     for task in tasks:
         (_, y_train), (_, y_test) = task.generate()
+
         readout = RegressionReadout(alpha=alpha)
         readout.fit(train_outputs, y_train)
+
         metrics, y_pred = readout.evaluate(test_outputs, y_test)
         scores.append((metrics, y_test, y_pred))
+
     return scores
 
 
-def run_memory_benchmark(window_length=10, length=1000, seed=42, alpha=1e-6, **protocol_kwargs):
-    """Score the reservoir on every delay the window allows.
-
-    Returns:
-        dict mapping each delay to its readout metrics, plus ``total_capacity``,
-        the sum of the per-delay capacities (at most ``window_length``).
-    """
+def run_memory_benchmark(
+    window_length=10,
+    length=1000,
+    seed=42,
+    alpha=1e-6,
+    **protocol_kwargs,
+):
+    """Measure memory capacity at each input delay."""
     protocol = build_protocol(seed=seed, **protocol_kwargs)
-    tasks = [MemoryTask(delay=d, length=length, window_length=window_length, seed=seed)
-             for d in range(window_length)]
 
-    results = {task.delay: metrics for task, (metrics, _, _) in zip(tasks, _score_sweep(protocol, tasks, alpha))}
-    results["total_capacity"] = sum(results[d]["capacity"] for d in range(window_length))
+    tasks = [
+        MemoryTask(
+            delay=delay,
+            length=length,
+            window_length=window_length,
+            seed=seed,
+        )
+        for delay in range(window_length)
+    ]
+
+    results = {
+        task.delay: metrics
+        for task, (metrics, _, _) in zip(tasks, _score_sweep(protocol, tasks, alpha))
+    }
+
+    results["total_capacity"] = sum(
+        results[delay]["capacity"] for delay in range(window_length)
+    )
+
     return results
 
 
-def run_parity_benchmark(window_length=10, length=1000, seed=42, alpha=1e-6, **protocol_kwargs):
-    """Score the reservoir on every parity order the window allows.
-
-    The readout is the same ridge regression as for the memory task, fitted on
-    the 0/1 target; its output is thresholded at 0.5 to get a class, so
-    ``accuracy`` is 0.5 at chance level.
-
-    Returns:
-        dict mapping each order to its readout metrics (``nmse``, ``capacity``,
-        ``accuracy``), plus ``total_capacity``.
-    """
+def run_parity_benchmark(
+    window_length=10,
+    length=1000,
+    seed=42,
+    alpha=1e-6,
+    **protocol_kwargs,
+):
+    """Measure the capacity to reconstruct temporal parity targets."""
     protocol = build_protocol(seed=seed, **protocol_kwargs)
-    tasks = [ParityTask(order=n, length=length, window_length=window_length, seed=seed)
-             for n in range(1, window_length + 1)]
+
+    tasks = [
+        ParityTask(
+            order=order,
+            length=length,
+            window_length=window_length,
+            seed=seed,
+        )
+        for order in range(1, window_length + 1)
+    ]
 
     results = {}
-    for task, (metrics, y_test, y_pred) in zip(tasks, _score_sweep(protocol, tasks, alpha)):
+
+    for task, (metrics, y_test, y_pred) in zip(
+        tasks, _score_sweep(protocol, tasks, alpha)
+    ):
         metrics["accuracy"] = float(np.mean((y_pred >= 0.5) == y_test))
         results[task.order] = metrics
-    results["total_capacity"] = sum(results[n]["capacity"] for n in range(1, window_length + 1))
+
+    results["total_capacity"] = sum(
+        results[order]["capacity"] for order in range(1, window_length + 1)
+    )
+
     return results
 
 
-def run_narma_benchmark(window_length=10, length=2000, seed=42, alpha=1e-6, **protocol_kwargs):
-    """Score the reservoir on NARMA10 one-step prediction.
-
-    Returns:
-        dict with the readout metrics (``nmse``, ``capacity``) and
-        ``linear_baseline_nmse``: the same readout fitted directly on the raw
-        input windows, i.e. what we get with no reservoir at all. The reservoir
-        is only earning its keep if it beats that.
-    """
+def run_narma_benchmark(
+    window_length=10,
+    length=2000,
+    seed=42,
+    alpha=1e-6,
+    **protocol_kwargs,
+):
+    """Evaluate NARMA10 prediction and compare against raw inputs."""
     protocol = build_protocol(seed=seed, **protocol_kwargs)
-    (X_train, y_train), (X_test, y_test) = NARMA10Task(length=length, window_length=window_length, seed=seed).generate()
+
+    (X_train, y_train), (X_test, y_test) = NARMA10Task(
+        length=length,
+        window_length=window_length,
+        seed=seed,
+    ).generate()
 
     readout = RegressionReadout(alpha=alpha)
     readout.fit(protocol.run(X_train), y_train)
+
     metrics, _ = readout.evaluate(protocol.run(X_test), y_test)
 
     baseline_readout = RegressionReadout(alpha=alpha)
     baseline_readout.fit(X_train[:, :, 0], y_train)
-    baseline, _ = baseline_readout.evaluate(X_test[:, :, 0], y_test)
+
+    baseline, _ = baseline_readout.evaluate(
+        X_test[:, :, 0],
+        y_test,
+    )
+
     metrics["linear_baseline_nmse"] = baseline["nmse"]
+
     return metrics
+
+
+def run_ipc_benchmark(
+    length=3000,
+    window_length=15,
+    max_degree=3,
+    max_delay=10,
+    washout=200,
+    test_split=0.2,
+    threshold=1e-3,
+    seed=42,
+    alpha=1e-6,
+    **protocol_kwargs,
+):
+    """Measure degree-wise information processing capacity."""
+    task = IPCTask(
+        length=length,
+        window_length=window_length,
+        max_degree=max_degree,
+        max_delay=max_delay,
+        washout=washout,
+        test_split=test_split,
+        threshold=threshold,
+        seed=seed,
+    )
+
+    (X_train, Y_train), (X_test, Y_test) = task.generate()
+
+    protocol = build_protocol(seed=seed, **protocol_kwargs)
+
+    readout = RegressionReadout(alpha=alpha)
+    readout.fit(protocol.run(X_train), Y_train)
+
+    Y_pred = readout.predict(protocol.run(X_test))
+
+    return task.compute_capacities(Y_pred, Y_test)
 
 
 def _print_table(title, param, results, columns):
     print(f"\n{title}")
-    print(f"{param:>6}  " + "  ".join(f"{c:>8}" for c in columns))
-    for key, m in results.items():
-        if key != "total_capacity":
-            print(f"{key:>6}  " + "  ".join(f"{m[c]:>8.3f}" for c in columns))
-    print(f"total capacity: {results['total_capacity']:.3f}")
+    print(f"{param:>6}  " + "  ".join(f"{column:>8}" for column in columns))
+
+    for key, metrics in results.items():
+        if key == "total_capacity":
+            continue
+
+        print(
+            f"{key:>6}  " + "  ".join(f"{metrics[column]:>8.3f}" for column in columns)
+        )
+
+    if "total_capacity" in results:
+        print(f"total capacity: {results['total_capacity']:.3f}")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--backend", nargs="+", choices=BACKEND_NAMES, default=list(BACKEND_NAMES))
-    parser.add_argument("--precision", type=float, default=0.05,
-                        help="target standard error per expectation value (gaussian / shots)")
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument(
+        "--tasks",
+        nargs="+",
+        choices=("memory", "parity", "narma", "ipc"),
+        default=["memory", "parity", "narma", "ipc"],
+        help="benchmarks to run; defaults to all",
+    )
+
+    parser.add_argument(
+        "--backend",
+        nargs="+",
+        choices=BACKEND_NAMES,
+        default=list(BACKEND_NAMES),
+        help="backend(s) to compare",
+    )
+
+    parser.add_argument(
+        "--hamiltonian",
+        choices=("random", *HAMILTONIAN_BUILDERS.keys()),
+        default="native-exchange",
+        help="reservoir model; random selects a random-circuit reservoir",
+    )
+
+    parser.add_argument(
+        "--precision",
+        type=float,
+        default=0.05,
+        help="target standard error for finite-precision backends",
+    )
+
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--alpha", type=float, default=1e-6)
+
+    # IPC options
+    parser.add_argument("--ipc-length", type=int, default=3000)
+    parser.add_argument("--ipc-window-length", type=int, default=15)
+    parser.add_argument("--max-degree", type=int, default=3)
+    parser.add_argument("--max-delay", type=int, default=10)
+    parser.add_argument("--washout", type=int, default=200)
+    parser.add_argument("--test-split", type=float, default=0.2)
+    parser.add_argument("--threshold", type=float, default=1e-3)
+
     args = parser.parse_args()
 
     for backend in args.backend:
-        kwargs = dict(backend=backend, precision=args.precision)
-        print(f"\n=== {backend}" + ("" if backend == "estimator-exact" else f" (precision {args.precision})") + " ===")
-        _print_table("Short-term memory", "delay", run_memory_benchmark(**kwargs), ["nmse", "capacity"])
-        _print_table("Temporal parity", "order", run_parity_benchmark(**kwargs), ["nmse", "capacity", "accuracy"])
+        kwargs = {
+            "backend": backend,
+            "precision": args.precision,
+            "seed": args.seed,
+            "hamiltonian": args.hamiltonian,
+        }
 
-        narma = run_narma_benchmark(**kwargs)
-        print("\nNARMA10")
-        print(f"nmse: {narma['nmse']:.3f}  (linear baseline on raw inputs: {narma['linear_baseline_nmse']:.3f})")
+        print(
+            f"\n=== Backend: {backend}"
+            + ("" if backend == "estimator-exact" else f" (precision {args.precision})")
+        )
+        print(f"Reservoir: {args.hamiltonian}")
+
+        if "memory" in args.tasks:
+            _print_table(
+                "Short-term memory",
+                "delay",
+                run_memory_benchmark(alpha=args.alpha, **kwargs),
+                ["nmse", "capacity"],
+            )
+
+        if "parity" in args.tasks:
+            _print_table(
+                "Temporal parity",
+                "order",
+                run_parity_benchmark(alpha=args.alpha, **kwargs),
+                ["nmse", "capacity", "accuracy"],
+            )
+
+        if "narma" in args.tasks:
+            narma = run_narma_benchmark(
+                alpha=args.alpha,
+                **kwargs,
+            )
+
+            print("\nNARMA10")
+            print(
+                f"nmse: {narma['nmse']:.3f} "
+                f"(linear baseline on raw inputs: "
+                f"{narma['linear_baseline_nmse']:.3f})"
+            )
+
+        if "ipc" in args.tasks:
+            ipc = run_ipc_benchmark(
+                length=args.ipc_length,
+                window_length=args.ipc_window_length,
+                max_degree=args.max_degree,
+                max_delay=args.max_delay,
+                washout=args.washout,
+                test_split=args.test_split,
+                threshold=args.threshold,
+                alpha=args.alpha,
+                **kwargs,
+            )
+
+            print("\nInformation Processing Capacity (IPC)")
+            print(json.dumps(ipc, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
