@@ -236,7 +236,7 @@ __marimo__/
 /results/armb/**/scores.npz
 /results/arma/**/scores.npz
 
-
+!/results/benchmarks/
 
 
 
