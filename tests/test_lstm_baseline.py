@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from experiments.lstm_baseline import run_lstm_baseline
+from qrc.baselines.lstm import run_lstm_baseline
 
 
 def test_lstm_baseline_trains_and_reports_classification_metrics():

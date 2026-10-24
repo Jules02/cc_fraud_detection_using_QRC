@@ -27,8 +27,8 @@ from sklearn.metrics import (
 )
 
 from experiments import cli
-from experiments.lstm_baseline import run_lstm_baseline
-from qrc.decision import card_precision_top_k, select_threshold_min_fp
+from qrc.baselines.lstm import run_lstm_baseline
+from qrc.decision import card_precision_top_ks, select_thresholds_min_fp
 from qrc.readout import ClassicalReadout
 
 
@@ -249,7 +249,7 @@ def classification_metrics(
         "f1_score": float(f1_score(y_true, y_pred, zero_division=0)),
         "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
         "matthews_corr_coef": float(matthews_corrcoef(y_true, y_pred)),
-        "pr_auc": float(average_precision_score(y_true, scores)),
+        "average_precision": float(average_precision_score(y_true, scores)),
         "roc_auc": float(roc_auc_score(y_true, scores)),
     }
 
@@ -262,16 +262,24 @@ def threshold_rows(
 ) -> list[dict]:
     rows: list[dict] = []
 
+    selected_thresholds = select_thresholds_min_fp(
+        data["y_validation"],
+        scores["validation"],
+        min_recalls=args.min_recalls,
+    )
+
     policies: list[tuple[str, float | None, float]] = [
-        ("fixed_0.5", None, args.fixed_threshold)
+        ("fixed_threshold", None, args.fixed_threshold)
     ]
-    for min_recall in sorted(set(args.min_recalls)):
-        threshold = select_threshold_min_fp(
-            data["y_validation"],
-            scores["validation"],
-            min_recall=min_recall,
+
+    for min_recall in sorted(selected_thresholds):
+        policies.append(
+            (
+                "min_fp_with_min_recall",
+                min_recall,
+                selected_thresholds[min_recall],
+            )
         )
-        policies.append(("min_fp_with_min_recall", min_recall, threshold))
 
     for policy, min_recall, threshold in policies:
         for split in EVAL_SPLITS:
@@ -295,21 +303,29 @@ def topk_rows(
     args: argparse.Namespace,
 ) -> list[dict]:
     rows: list[dict] = []
-    for top_k in sorted(set(args.top_ks)):
+    top_ks = sorted(set(args.top_ks))
+
+    values_by_split = {
+        split: card_precision_top_ks(
+            data[f"y_{split}"],
+            scores[split],
+            data[f"groups_{split}"],
+            data[f"timestamps_{split}"],
+            top_ks=top_ks,
+        )
+        for split in EVAL_SPLITS
+    }
+
+    for top_k in top_ks:
         for split in EVAL_SPLITS:
-            value = card_precision_top_k(
-                data[f"y_{split}"],
-                scores[split],
-                data[f"groups_{split}"],
-                data[f"timestamps_{split}"],
-                top_k=top_k,
-            )
             rows.append(
                 {
                     "model": model,
                     "split": split,
                     "top_k": top_k,
-                    "card_precision_top_k": float(value),
+                    "card_precision_top_k": float(
+                        values_by_split[split][top_k]
+                    ),
                 }
             )
     return rows
@@ -339,7 +355,7 @@ def write_summary(
         "false_positive_rate",
         "false_positives",
         "f1_score",
-        "pr_auc",
+        "average_precision",
     ]
     lines.append(test_threshold[cols].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
 
@@ -351,7 +367,7 @@ def write_summary(
         "",
         "Interpretation",
         "--------------",
-        "* fixed_0.5 is the legacy reference.",
+        "* fixed_threshold is the fixed decision-threshold reference.",
         "* min_fp_with_min_recall selects its threshold on validation only and freezes it for test.",
         "* Card Precision@K is a ranking/capacity metric and does not choose the probability threshold.",
         "* Compare lower test false-positive rate against the resulting test recall to understand the customer-protection trade-off.",

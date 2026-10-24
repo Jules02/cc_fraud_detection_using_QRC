@@ -57,6 +57,7 @@ python -m experiments.cli <command> [options]
 | `prepare`  | Data preparation only. Prints the split shapes and fraud counts.                                         |
 | `baseline` | Classical control: the logistic readout fitted directly on the raw (flattened) windows.                  |
 | `lstm`     | Classical control: an LSTM trained on the windows; validation loss picks the best epoch (needs PyTorch). |
+| `esn`      | Classical reservoir control: a fixed random echo state network on each window, then the same logistic readout as `qrc`. |
 | `qrc`      | Runs the quantum reservoir on each window, then fits the same logistic readout on its outputs.           |
 
 All commands run the same data preparation:
@@ -65,9 +66,23 @@ All commands run the same data preparation:
 data (simulated or loaded) → feature engineering → DataProcessor → per-customer windows
 ```
 
-Models are fitted on **train only**. Average precision (AP), ROC-AUC, F1, precision, recall, Matthews correlation
-coefficient (MCC) and balanced accuracy are reported on **validation and test**. Nothing is tuned on
-validation, except that the `lstm` command uses validation loss for early stopping.
+Models are fitted on **train only**. Validation is used for two things only: the decision threshold
+(the one with the fewest false positives that still catches at least `--min-recall` of the frauds;
+it is then frozen and reused on test) and, for `lstm`, early stopping on validation loss (the
+hyperparameter search, [below](#hyperparameter-search-optuna), also selects on validation).
+
+Reported on **validation and test**:
+
+- threshold-free: average precision (AP) and ROC-AUC;
+- at the selected threshold: F1, precision, recall, false positive rate, Matthews correlation
+  coefficient (MCC) and balanced accuracy;
+- **Card Precision@K** (`card_precision_top_k`): every day, the `--top-k` customers with the highest score are
+  reviewed, and the metric is the mean daily fraction of them that are fraudulent (as in the
+  Fraud Detection Handbook; a detected card is dropped on later days);
+- **AP per fraud category** (`average_precision_{amount,terminal,customer}`), when the data carries the
+  simulator's fraud scenarios: each category ranked against the genuine transactions. `amount` frauds give themselves
+  away by their amount alone, `terminal` frauds need the terminal's history and `customer` frauds need
+  the customer's history (see `qrc/evaluation.py`).
 
 Run `python -m experiments.cli <command> --help` to list every option.
 
@@ -80,11 +95,23 @@ python -m experiments.cli baseline --size medium
 # LSTM baseline on a small-sized simulated dataset
 python -m experiments.cli lstm --size small --epochs 10
 
+# Echo state network (classical reservoir) baseline
+python -m experiments.cli esn --size small --n-units 50 --spectral-radius 0.9
+
 # QRC with the exact Qiskit Estimator
 python -m experiments.cli qrc --size medium --backend estimator-exact
 
+# The same exact simulation in plain NumPy, much faster for small registers (up to ~8 qubits)
+python -m experiments.cli qrc --size medium --backend numpy
+
 # QRC with shot noise (~1/precision² shots per expectation value)
 python -m experiments.cli qrc --size medium --backend shots --precision 0.05
+
+# Pulse-level noisy simulation with SpinPulse (exact expectation values, 1/f qubit-frequency noise)
+python -m experiments.cli qrc --size small --backend spinpulse --noise pink --t2 50000 --precision 0
+
+# Decision threshold that keeps at least 90% validation recall; Card Precision@50 per day
+python -m experiments.cli baseline --size medium --min-recall 0.9 --top-k 50
 
 # A bigger reservoir and more features
 python -m experiments.cli qrc --feature-set 10 --n-mem-qubits 3 --depth 3 --observables Z+ZZ
@@ -113,12 +140,14 @@ python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
 | `--feature-set 1\|7\|10\|15`   | `7`        | `1`: the raw log amount only. `7`, `10`, `15`: selected by the feature analysis, each extends the previous ([list](docs/data_pipeline.md#4-feature-analysis-and-the-feature-sets)) |
 | `--window-length`             | `3`        | Number of transactions per customer window                                                                                                           |
 
-**Readout and output**, for `baseline` and `qrc` (`--output-dir` also applies to `lstm`):
+**Readout, evaluation and output**, for `baseline`, `lstm`, `esn` and `qrc` (`--alpha` is not used by `lstm`):
 
-| Option         | Default        | Meaning                                |
-| -------------- | -------------- | -------------------------------------- |
-| `--alpha`      | `1.0`          | Readout regularisation (`C = 1/alpha`) |
-| `--output-dir` | `results/runs` | Where runs are saved                   |
+| Option         | Default        | Meaning                                                                                       |
+| -------------- | -------------- | --------------------------------------------------------------------------------------------- |
+| `--alpha`      | `1.0`          | Readout regularisation (`C = 1/alpha`)                                                        |
+| `--min-recall` | `0.8`          | Minimum validation recall when picking the decision threshold (fewest false positives above it) |
+| `--top-k`      | `100`          | Customers reviewed per day for Card Precision@K                                               |
+| `--output-dir` | `results/runs` | Where runs are saved                                                                          |
 
 **LSTM**, for `lstm` only:
 
@@ -131,18 +160,34 @@ python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
 | `--patience`      | `8`     | Epochs without validation-loss improvement before stopping |
 | `--seed`          | `42`    | Training seed                                              |
 
+**Echo state network**, for `esn` only. Each window starts from a zero state (like the reset-window QRC) and the
+state after its last transaction is the readout input:
+
+| Option              | Default | Meaning                                                             |
+| ------------------- | ------- | ------------------------------------------------------------------- |
+| `--n-units`         | `50`    | Reservoir neurons                                                   |
+| `--spectral-radius` | `0.9`   | Largest absolute eigenvalue of the recurrent weights (memory decay) |
+| `--leak-rate`       | `1.0`   | State update rate in (0, 1]; smaller is slower, with longer memory  |
+| `--input-scaling`   | `1.0`   | Input weights are uniform in `[-s, s]`                              |
+| `--bias-scaling`    | `0.2`   | Neuron biases are uniform in `[-s, s]`                              |
+| `--density`         | `1.0`   | Fraction of non-zero recurrent weights                              |
+| `--seed`            | `42`    | Reservoir seed                                                      |
+
 **Reservoir and backend**, for `qrc` only:
 
 | Option               | Default            | Meaning                                                                                                                   |
 | -------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `--backend`          | `estimator-exact`  | `estimator-exact`, `gaussian` or `shots` (see below)                                                                      |
-| `--precision`        | `0.05`             | Target standard error per expectation value (`gaussian` / `shots`)                                                        |
+| `--backend`          | `estimator-exact`  | `estimator-exact`, `gaussian`, `shots`, `numpy` or `spinpulse` (see below)                                                |
+| `--precision`        | `0.05`             | Target standard error per expectation value (`gaussian` / `shots` / `spinpulse`; `0` is exact, `spinpulse` only)          |
 | `--n-input-qubits`   | number of features | Input qubits. With fewer qubits than features, dense angle encoding is used (see below)                                   |
 | `--n-mem-qubits`     | `2`                | Memory qubits                                                                                                             |
 | `--hamiltonian`      | `random`           | `random`, `tfim`, `tfim-longitudinal`, `tfim-native` or `native-exchange`                                                 |
 | `--topology`         | `linear`           | Hamiltonian connectivity: `linear`, `ring` or `fully-connected`; ignored for `--hamiltonian random`                       |
+| `--evolution-time`   | `1.0`              | Hamiltonian evolution time between encodings; ignored for `--hamiltonian random`                                          |
+| `--trotter-steps`    | `2`                | Trotter steps per evolution; ignored for `--hamiltonian random`. One step makes reset `tfim` blind to u → 1−u             |
 | `--depth`            | `2`                | Reservoir circuit depth                                                                                                   |
 | `--entangler`        | `cx`               | `cx` or `cry`                                                                                                             |
+| `--encoding`         | `auto`             | `angle`, `dense` or `reupload`. `auto` picks one from the qubit count and `--encoding-layers` (see below)                 |
 | `--encoding-layers`  | `1`                | Times each transaction is encoded (data re-uploading). `1` is plain angle encoding                                        |
 | `--encoding-scaling` | `π`                | Rotation angle per unit of (scaled) feature, in each encoding layer                                                       |
 | `--reset-inputs`     | off                | Reset the input qubits before each transaction is encoded (density-matrix simulation, slower)                             |
@@ -154,40 +199,42 @@ The backends:
 - `estimator-exact` (default): exact, noiseless simulation with the Qiskit Aer Estimator. Windows are sent to Aer in batches.
 - `gaussian`: exact expectation values plus Gaussian noise of width `--precision`. This is a cheap stand-in for shot noise.
 - `shots`: real shot sampling with about `1/precision²` shots.
+- `numpy`: exact, noiseless batched simulation in plain NumPy. Same results as `estimator-exact`, but much faster
+  for small registers (up to ~8 qubits).
+- `spinpulse`: pulse-level noisy simulation with SpinPulse. 
 
 The reservoir can be a random circuit (the default) or a Trotterized Hamiltonian model.
 The Hamiltonian choice and topology are included in the run configuration and summary.
 
 The encodings:
 
-- **Angle encoding** (default): one feature per input qubit, as a `RY` rotation of `scaling × feature`.
-- **Dense angle encoding**: used automatically when `--n-input-qubits` is smaller than the number of
+- **Angle encoding** (`--encoding angle`): one feature per input qubit, as a `RY` rotation of `scaling × feature`.
+- **Dense angle encoding** (`--encoding dense`): used automatically when `--n-input-qubits` is smaller than the number of
   features (with `--encoding-layers 1`). Each qubit carries up to two features: one as a `RY`
   rotation, one as a `RZ` rotation. So the number of features can be at most twice `--n-input-qubits`.
-- **Re-uploading** (`--encoding-layers` > 1): the transaction is angle-encoded several times, with
+- **Re-uploading** (`--encoding reupload`, or `--encoding-layers` > 1): the transaction is angle-encoded several times, with
   fixed random `RZ` rotations in between. Each feature then enters with frequencies up to
   `layers × scaling`.
 
 ### Results
 
-Each `baseline`, `lstm` and `qrc` run creates a directory `results/runs/<timestamp>_<command>/` containing:
+Each `baseline`, `lstm`, `esn` and `qrc` run creates a directory `results/runs/<timestamp>_<command>/` containing:
 
 - `config.json`: every argument, the data source, the features used and the split sizes
-- `metrics.json`: validation and test metrics, plus the reservoir runtime for `qrc` or the training time for `lstm`
+- `metrics.json`: validation and test metrics, plus the reservoir runtime for `esn` and `qrc` or the training time for `lstm`
 - `scores.npz`: labels and predicted scores per split, for plotting PR/ROC curves later
 
 Each run also appends one row to **`results/runs/summary.csv`**, so you can compare runs side
 by side. A row records:
 
 - the run: its name, the git commit (with `-dirty` if there were uncommitted changes) and the command;
-- the data: its source, feature set, window length, and the size and fraud count of each split;
-- for `qrc`, the reservoir: backend, precision, encoding layers and scaling, qubit counts, depth,
-  entangler, input reset, observables and seed, plus the reservoir runtime;
+- the data: its source, feature set, window length, and the size and fraud count (per category, when known) of each split;
+- for `qrc`, the reservoir: backend, precision, encoding (type, layers and scaling), qubit counts, depth,
+  entangler, input reset, observables, seed, Hamiltonian, topology, evolution time and Trotter steps, plus the reservoir runtime;
+- for `esn`, the reservoir: units, spectral radius, leak rate, input and bias scaling, density, seed and runtime;
 - for `lstm`, the training seed and training time;
-- the readout: `alpha` (empty for `lstm`), the decision threshold, and every metric (average precision, ROC-AUC,
-  F1, precision, recall, MCC, balanced accuracy) on validation and test.
-
-`results/` is git-ignored.
+- the readout: `alpha` (empty for `lstm`), `--min-recall`, the selected decision threshold, `--top-k`, and every
+  [metric](#running-experiments) on validation and test.
 
 ### Reproducibility
 
@@ -201,6 +248,100 @@ python -m experiments.cli qrc --data load --data-dir data/sim_medium
 ```
 
 Loading saved data gives the same results as simulating it again.
+
+### Running many configurations (sweeps)
+
+`experiments/sweep.py` runs a list of `experiments.cli` commands one after the other and prepares each
+dataset only once. The jobs file holds one command per line, without the `python -m experiments.cli`
+prefix (blank lines and `#` comments are skipped):
+
+```
+# jobs.txt
+baseline --data load --feature-set 7 --window-length 1
+qrc --data load --feature-set 7 --window-length 1 --seed 42
+qrc --data load --feature-set 7 --window-length 1 --seed 43
+```
+
+```bash
+python -m experiments.sweep jobs.txt
+```
+
+Jobs with the same data settings (source, feature set, window length) share the prepared data. A failing
+job is reported and the sweep moves on. Results go to each job's `--output-dir` and `summary.csv` as usual.
+
+### Hyperparameter search (Optuna)
+
+`experiments/tune.py` searches the reservoir configuration with [Optuna](https://optuna.org)
+(multi-objective TPE sampler). Each trial is a full `qrc` run. It **maximises** the
+**validation** score (average precision by default; `--metric` takes any reported metric, e.g.
+`average_precision_customer` or `card_precision_top_k`) and **minimises** the costs below at the
+same time. The result is a **Pareto front**: the trials that no other trial beats on every
+objective at once. The test split is never used for selection.
+
+| Cost (`--objectives`) | What it measures                                                                                                                  |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `qubits`              | Input + memory qubits                                                                                                             |
+| `depth`               | Depth of the circuit for one window (L × encoding + reservoir), transpiled to `rz`/`sx`/`x`/`cz` on a linear chain of qubits     |
+| `bases`               | Measurement bases: observables that can be read from the same shots count once (`Z` and `Z+ZZ`: 1, `XYZ`: 3)                     |
+| `shots`               | Shots per basis, ≈ 1/precision². Searched over 100 … 10,000. Needs `--backend gaussian`, `shots` or `spinpulse`               |
+| `wall_time`           | Seconds to simulate the reservoir over all splits (machine-dependent)                                                            |
+
+By default all costs are objectives, except `shots` with an exact backend. Pass a subset with
+`--objectives qubits depth`, or `--objectives` alone for a single-objective search.
+
+```bash
+# Simplest: accuracy against circuit depth, on the small dataset
+python -m experiments.tune --study-name depth --objectives depth --size small --n-trials 30
+
+# The full multi-objective search, with sampled expectation values
+python -m experiments.tune --n-trials 100 --size medium --backend gaussian
+
+# Accuracy against hardware size only, averaged over three reservoir seeds
+python -m experiments.tune --study-name size --objectives qubits depth --seeds 1 2 3 --n-trials 50
+```
+
+The search space (`suggest_params` in `experiments/tune.py`; ranges are constants at the top of the file).
+The default is the value `experiments.cli qrc` uses when the option is not given, i.e. without tuning:
+
+| Parameter                       | Values searched                                                               | Default (`cli qrc`)                    |
+| ------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------- |
+| encoding                        | `angle`, `dense`, `reupload` (`--encodings`)                                  | `auto` (angle with one qubit per feature) |
+| input qubits                    | dense: ⌈F/2⌉ … F−1; angle / reupload: F … F+2 (F = number of features)        | F                                      |
+| memory qubits                   | 1 … 4, with input + memory ≤ `--max-qubits` (default 12)                      | 2                                      |
+| encoding layers                 | 2 … 3 (reupload only)                                                          | 1                                      |
+| encoding scaling                | π/4 … 2π                                                                      | π                                      |
+| reservoir                       | `random` or a Hamiltonian (`--hamiltonians`)                                  | `random`                               |
+| depth, entangler                | 1 … 4, `cx` / `cry`; random circuit only                                      | 2, `cx`                                |
+| topology, evolution time        | `--topologies`, 0.1 … 10 (log); Hamiltonians only                             | `linear`, 1.0                          |
+| observables                     | `Z`, `Z+ZZ`, `XYZ`, `Z+ZZ-all`                                                | `Z`                                    |
+| readout `alpha`                 | 1e-1 … 1e5 (log)                                                              | 1.0                                    |
+| precision                       | 0.1, 0.05, 0.02, 0.01 (≈100 … 10,000 shots); only with the `shots` objective  | 0.05 (≈400 shots)                      |
+
+Parts of each reservoir are random but fixed: the gate angles of the random circuit and the
+couplings of the Hamiltonians. The seed picks that random draw. `--seeds 1 2 3` runs every trial
+with three draws and scores it by their average, so a configuration can't win through one lucky
+draw (each trial takes 3× longer). Without `--seeds`, every trial uses `--seed` (default `42`).
+
+With the `shots` objective, the precision is searched too.
+
+Tuner options: `--n-trials`, `--timeout`, `--study-name`, `--output-dir` (default `results/tune`),
+`--storage`, `--metric`, `--objectives`, `--seeds`, `--max-qubits`, `--encodings`, `--hamiltonians`,
+`--topologies` and `--sampler-seed`. Every other option goes to `qrc` unchanged and is fixed for the
+whole study (data, feature set, window length, backend, ...). Passing an option the search sets
+(e.g. `--n-mem-qubits`) is an error.
+
+A study is saved in `results/tune/<study-name>/`:
+
+- `study.db`: the Optuna study. Running the same command again **resumes** it. Resuming with
+  different fixed options is refused, so that all trials in a study stay comparable.
+- `runs/`: every trial as an ordinary `qrc` run, with its own `summary.csv`
+- `trials.csv`: one row per trial, with its parameters, objective values, costs (also two-qubit
+  gate count and depth, and number of observables) and validation and test metrics
+- `pareto.json`: the Pareto front, each trial with the `experiments.cli qrc` command that reproduces it
+
+At the end, the tuner prints the Pareto front as a table.
+To browse a study interactively: `pip install optuna-dashboard`, then
+`optuna-dashboard sqlite:///results/tune/qrc/study.db`.
 
 ---
 
@@ -230,12 +371,11 @@ NaN handling, preprocessing and windowing), see **[docs/data_pipeline.md](docs/d
 
 The CLI is the recommended entry point. These scripts are still useful for exploration:
 
-| Script                              | Purpose                                                                        |
-| ----------------------------------- | ------------------------------------------------------------------------------ |
+| Script                                    | Purpose                                                                        |
+| ----------------------------------------- | ------------------------------------------------------------------------------ |
+| `experiments/compare_decision_policies.py` | Fixed 0.5 threshold vs. validation-selected thresholds (several minimum recalls) vs. Card Precision@K (several K), on the same model scores |
 | `experiments/run_data.py`           | Data → features → analysis plots → model input, from the daily split files     |
 | `experiments/dataset_analysis.py`   | Exploration and feature analysis of a simulated dataset                        |
-| `experiments/pipeline.py`           | The original single-file end-to-end QRC run (configuration is set in the file) |
-| `experiments/pipeline_estimator.py` | Same as above, comparing the Estimator backends (`--precision`)                |
 | `experiments/run_benchmarks.py`     | QRC on synthetic tasks with known answers (memory, parity, NARMA10)            |
 
 Run them as modules from the repository root, e.g. `python -m experiments.run_benchmarks`.
@@ -280,8 +420,8 @@ cc_fraud_detection_using_QRC/
 │   ├── features/            # fraud feature engineering
 │   ├── analysis/            # exploration, feature scoring and selection, plots
 │   ├── benchmarks/          # synthetic tasks: memory, parity, NARMA10
-│   ├── backends/            # Qiskit Aer Estimator, spin-pulse
-│   ├── baselines/           # classical baseline models (LSTM)
+│   ├── backends/            # Qiskit Aer Estimator, NumPy (exact, small registers), SpinPulse (pulse-level noise)
+│   ├── baselines/           # classical baselines: LSTM (model and training), echo state network
 │   ├── processing.py        # final model input: feature selection, imputation, scaling
 │   ├── sequences.py         # 2D features → (n, window_length, features) per-customer windows
 │   ├── encodings.py         # input encodings (AngleEncoding, ...)
@@ -291,10 +431,14 @@ cc_fraud_detection_using_QRC/
 │   ├── observables.py       # measured observables
 │   ├── protocol.py          # encode → evolve → measure loop
 │   ├── readout.py           # classical readout layers
+│   ├── decision.py          # decision threshold selection, Card Precision@K
+│   ├── evaluation.py        # fraud categories and per-category average precision
 │   └── logger.py
 ├── experiments/             # experiment scripts (not packaged)
-│   └── cli.py               # ← the experiment runner
-├── docs/                    # data pipeline and feature catalog
+│   ├── cli.py               # ← the experiment runner
+│   ├── sweep.py             # many cli.py commands, data prepared once
+│   └── tune.py              # Optuna hyperparameter search over cli.py's qrc
+├── docs/                    # data pipeline, feature catalog, experiment plan (experiments.md)
 ├── tests/                   # pytest suite
 ├── thelab/                  # reference QRC implementation (git submodule)
 ├── data/                    # train/validation/test splits (git-ignored)
