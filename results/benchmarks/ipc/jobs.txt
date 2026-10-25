@@ -1,0 +1,19 @@
+for hamiltonian in random tfim tfim-longitudinal tfim-native native-exchange; do
+    mkdir -p "results/benchmarks/ipc/${hamiltonian}"
+
+    for backend in shots; do
+        for precision in 0.01 0.05 0.1; do
+            for seed in $(seq 1 50); do
+                echo "Running hamiltonian=$hamiltonian backend=$backend precision=$precision seed=$seed"
+
+                python -m experiments.run_benchmarks \
+                    --tasks ipc \
+                    --backend "$backend" \
+                    --hamiltonian "$hamiltonian" \
+                    --precision "$precision" \
+                    --seed "$seed" \
+                    > "results/benchmarks/ipc/${hamiltonian}/${backend}_precision${precision}_seed${seed}.txt" 2>&1
+            done
+        done
+    done
+done

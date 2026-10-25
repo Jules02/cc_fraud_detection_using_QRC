@@ -1,0 +1,11 @@
+
+=== Backend: shots (precision 0.05)
+Reservoir: random
+
+Information Processing Capacity (IPC)
+{
+  "degree_1": 0.46167143557043633,
+  "degree_2": 0.4616576002912094,
+  "degree_3": 0.2288852438947473,
+  "total_capacity": 1.152214279756393
+}

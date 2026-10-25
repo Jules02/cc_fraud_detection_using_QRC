@@ -1,0 +1,11 @@
+
+=== Backend: shots (precision 0.05)
+Reservoir: tfim-native
+
+Information Processing Capacity (IPC)
+{
+  "degree_1": 1.1829175793090414,
+  "degree_2": 0.326656232926261,
+  "degree_3": 0.15333143959143136,
+  "total_capacity": 1.662905251826733
+}
