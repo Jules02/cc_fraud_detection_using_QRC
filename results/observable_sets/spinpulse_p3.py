@@ -1,24 +1,24 @@
-"""P3: observable sets on the pulse-level SpinPulse model, with the measurement-basis changes as real pulses.
+"""P3: memory capacity of the observable sets on the pulse-level SpinPulse model, with the basis changes as pulses.
 
-Same tasks, observable sets (minus Z-strings+mix), shot model, readout and output format as observables.py; only
-the noise model changes. The TFIM 2-step reservoir and the RY(pi u) encoding are compiled to SpinPulse pulses
-(SpinPulseBackend's timeline). Each noise realization is one set of pink (1/f) dephasing traces covering the whole
-window plus a measurement block, shared by all windows. With the traces fixed every block is a unitary, and the
-state is propagated as a density matrix, so the input reset is exact (no sampled reset trajectories). The
-measurement block applies each setting's frame change as pulses on the same traces: per qubit RZ(lambda) then
-RY(theta) of the ZYZ decomposition of the frame unitary (the last RZ commutes with the Z readout). Qubits
-measured in Z idle through the block. Outcome distributions are averaged over the realizations; readout flips
-(0.07 %) and the reset preparation error are applied as in observables.py.
+Same task, reservoir, observable sets, shot model, readout and output format as observables.py (P2); only the noise
+model changes. The reservoir and the RY(pi u) encoding are compiled to SpinPulse pulses (SpinPulseBackend's
+timeline). Each noise realization is one set of pink (1/f) dephasing traces covering the whole window plus a
+measurement block, shared by all windows. With the traces fixed every block is a unitary, and the state is
+propagated as a density matrix, so the input reset is exact (no sampled reset trajectories). The measurement block
+applies each setting's frame change as pulses on the same traces: per qubit RZ(lambda) then RY(theta) of the ZYZ
+decomposition of the frame unitary (the last RZ commutes with the Z readout); qubits measured in Z idle through the
+block. Outcome distributions are averaged over the realizations; readout flips (0.07 %) and the reset preparation
+error are applied as in P2.
 
 Calibration (--calibrate). SpinPulse noise is pure dephasing, whose infidelity grows as (duration / T2*)^2, and a
 two-qubit RZZ (with its echo) is ~20x longer than a 1q pi/2 pulse. So one T2* cannot give the hardware's 98 % 2q
 and 99.6 % 1q at once: T2* is set so that RZZ(pi/2) has the target average gate fidelity, and the 1q fidelity
-that follows (~99.99 %) is reported. Missing 1q error is a model limit (control errors are not in SpinPulse).
+that follows (~99.998 %) is reported. The missing 1q error (control errors) is not in SpinPulse.
 
 Usage:
-    python results/observables/spinpulse_p3.py --calibrate
-    python results/observables/spinpulse_p3.py --check
-    python results/observables/spinpulse_p3.py --n 4 --reset 1 --seed 42 --out results/observables/runs_p3
+    python results/observable_sets/spinpulse_p3.py --calibrate
+    python results/observable_sets/spinpulse_p3.py --check
+    python results/observable_sets/spinpulse_p3.py --n 5 --seed 42 --out results/observable_sets/data/p3
 """
 import argparse
 import itertools
@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from qiskit import QuantumCircuit
-from qiskit.quantum_info import Operator, random_unitary
+from qiskit.quantum_info import Operator, PauliList, random_unitary
 from qiskit.synthesis import OneQubitEulerDecomposer
 
 import observables as obs
@@ -54,6 +54,7 @@ LEVELS = {
     "sp-2q99": 156.0,
     "sp-2q98": 110.0,
 }
+LEVEL_ID_OFFSET = 100  # sampling-stream ids distinct from P2's levels
 _ZYZ = OneQubitEulerDecomposer("ZYZ")
 
 
@@ -126,14 +127,9 @@ def frame_gates(factors):
 
 # ---------------------------------------------------------------- simulation
 
-def settings_for(n, seed):
-    sets = obs.pauli_settings(n, seed)
-    sets.pop("Z-strings+mix")
-    return sets
-
-
-def simulate(X, reservoir, n, reset, T2S, seed, keys, realizations=REALIZATIONS, meas_block=True):
-    """Outcome distributions per setting key, averaged over noise realizations, before readout flips."""
+def simulate(X, reservoir, n, T2S, seed, keys, realizations=REALIZATIONS, meas_block=True, reset=True):
+    """Outcome distributions per setting key, averaged over noise realizations, before readout flips.
+    `reset=False` is only used by check(), to compare with SpinPulseBackend's exact (trajectory-free) path."""
     noisy = T2S is not None
     config = SpinPulseConfig(noise_type="pink" if noisy else "none", T2S=T2S or 100.0, seed=seed)
     backend = SpinPulseBackend(config)
@@ -189,83 +185,63 @@ def simulate(X, reservoir, n, reset, T2S, seed, keys, realizations=REALIZATIONS,
     return probs
 
 
-def run(n, reset, seed, length, levels, budgets):
+def run(n, seed, length, levels, budgets):
     reservoir = obs.make_reservoir(n, seed)
-    sets = settings_for(n, seed)
+    sets = obs.pauli_settings(n, seed)
     keys = sorted({key for s in sets.values() for key, *_ in s})
-    rng = np.random.default_rng([seed, n, reset, 3])
+    X_train, Y_train, X_test, Y_test = obs.task_data(seed, length)
     rows, feat_rows = [], []
-    for task in ("stm", "parity"):
-        X_train, Y_train, X_test, Y_test = obs.task_data(task, seed, length)
-        for level in levels:
-            t0 = time.time()
-            probs = {}
-            for split, X in (("train", X_train), ("test", X_test)):
-                raw = simulate(X, reservoir, n, reset, LEVELS[level], seed, keys)
-                probs[split] = {key: obs.readout(p, P_RO, n) for key, p in raw.items()}
-            for name, settings in sets.items():
-                n_settings = len(settings)
-                exact = obs.features(probs["train"], settings, n, None, rng)
-                w = obs.weights(settings)
-                for weight in np.unique(w):
-                    feat_rows.append(dict(task=task, n=n, reset=reset, seed=seed, noise=level, observables=name,
-                                          weight=int(weight), n_features=int((w == weight).sum()),
-                                          median_std=float(np.median(exact[:, w == weight].std(0)))))
-                for budget in budgets:
-                    shots = None if budget is None else budget // n_settings
-                    if shots == 0:
-                        continue
-                    F_train = obs.features(probs["train"], settings, n, shots, rng)
-                    F_test = obs.features(probs["test"], settings, n, shots, rng)
-                    C, alphas = obs.ridge_capacity(F_train, Y_train, F_test, Y_test)
-                    chance, _ = obs.ridge_capacity(F_train, Y_train, F_test, rng.permutation(Y_test))
-                    for d in range(Y_train.shape[1]):
-                        rows.append(dict(task=task, n=n, reset=reset, seed=seed, noise=level, observables=name,
-                                         n_features=F_train.shape[1], n_settings=n_settings,
-                                         budget=np.inf if budget is None else budget, shots_per_setting=shots,
-                                         delay=d, capacity=C[d], chance=chance[d], alpha=alphas[d]))
-            print(f"n={n} reset={reset} seed={seed} {task} {level}: {time.time() - t0:.1f}s", flush=True)
+    for level in levels:
+        t0 = time.time()
+        probs = {}
+        for split, X in (("train", X_train), ("test", X_test)):
+            raw = simulate(X, reservoir, n, LEVELS[level], seed, keys)
+            probs[split] = {key: obs.readout(p, P_RO, n) for key, p in raw.items()}
+        level_id = LEVEL_ID_OFFSET + list(LEVELS).index(level)
+        r, f = obs.evaluate(probs, sets, n, seed, level, level_id, budgets, Y_train, Y_test)
+        rows += r
+        feat_rows += f
+        print(f"n={n} seed={seed} {level}: {time.time() - t0:.1f}s", flush=True)
     return pd.DataFrame(rows), pd.DataFrame(feat_rows)
 
 
 def check():
-    """1. frame factors rebuild the settings' frame unitaries; 2. noiseless pulses, no reset: every setting's
-    exact features equal SpinPulseBackend's exact Pauli expectations; 3. pink noise, no reset, Z readout: the
-    density-matrix loop equals SpinPulseBackend (same traces); 4. noiseless reset vs the ideal circuit."""
+    """1. frame factors rebuild the settings' frame unitaries; 2. noiseless pulses: every setting's exact features
+    equal SpinPulseBackend's exact Pauli expectations; 3. pink noise, Z readout: the density-matrix loop equals
+    SpinPulseBackend on the same traces (2 and 3 without reset, where SpinPulseBackend has no reset trajectories);
+    4. noiseless pulses with reset vs the ideal circuit."""
     for n in (4, 5):
-        for key, V, *_ in itertools.chain.from_iterable(settings_for(n, 42).values()):
+        for key, V, *_ in itertools.chain.from_iterable(obs.pauli_settings(n, 42).values()):
             f = qubit_factors(key, n, 42)
             K = np.array([[1.0]])
             for U in f[::-1]:
                 K = np.kron(K, U)
             assert np.allclose(K, V), f"frame factors wrong for {key}"
     n = 4
-    X = obs.task_data("stm", 42, 40)[0][:12]
+    X = obs.task_data(42, 40)[0][:12]
     reservoir = obs.make_reservoir(n, 42)
-    sets = settings_for(n, 42)
+    sets = obs.pauli_settings(n, 42)
     keys = sorted({key for s in sets.values() for key, *_ in s})
 
-    probs = simulate(X, reservoir, n, False, None, 42, keys)
-    for name in ("XYZ", "XYZ-strings", "XYZ+XYZ-2body", "all-Pauli"):
+    probs = simulate(X, reservoir, n, None, 42, keys, reset=False)
+    for name in ("XYZ-strings", "XYZ+XYZ-2body", "all-Pauli"):
         settings = sets[name]
-        ours = obs.features(probs, settings, n, None, None)
-        paulis = obs.PauliList([p for *_, group, _ in settings for p in group])
+        paulis = PauliList([p for *_, group in settings for p in group])
         ref = QRCProtocol(AngleEncoding(1), reservoir, paulis,
                           SpinPulseBackend(SpinPulseConfig(noise_type="none", seed=42))).run(X)
-        err = np.abs(ours - ref).max()
+        err = np.abs(obs.features(probs, settings, n, None, None) - ref).max()
         assert err < 1e-6, f"noiseless frame pulses disagree with SpinPulseBackend for {name}: {err:.2e}"
 
     z = sets["Z-strings"]
-    paulis = obs.PauliList([p for *_, group, _ in z for p in group])
-    probs = simulate(X, reservoir, n, False, 105.0, 42, ["Z"], realizations=5, meas_block=False)
+    paulis = PauliList([p for *_, group in z for p in group])
+    probs = simulate(X, reservoir, n, 105.0, 42, ["Z"], realizations=5, meas_block=False, reset=False)
     ref = QRCProtocol(AngleEncoding(1), reservoir, paulis, SpinPulseBackend(
         SpinPulseConfig(noise_type="pink", T2S=105.0, noise_samples=5, seed=42))).run(X)
     err = np.abs(obs.features(probs, z, n, None, None) - ref).max()
     assert err < 1e-8, f"noisy density-matrix loop disagrees with SpinPulseBackend: {err:.2e}"
 
-    probs = simulate(X, reservoir, n, True, None, 42, ["Z"])
-    ideal = NumpyBackend(reset_inputs=True)
-    ref = QRCProtocol(AngleEncoding(1), reservoir, paulis, ideal).run(X)
+    probs = simulate(X, reservoir, n, None, 42, ["Z"])
+    ref = QRCProtocol(AngleEncoding(1), reservoir, paulis, NumpyBackend(reset_inputs=True)).run(X)
     err = np.abs(obs.features(probs, z, n, None, None) - ref).max()
     print(f"noiseless pulses + reset vs ideal circuit: max |diff| {err:.1e} (pulse compilation + 0.07 % reset error)")
     assert err < 5e-3
@@ -276,11 +252,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--calibrate", action="store_true")
     parser.add_argument("--check", action="store_true")
-    parser.add_argument("--n", type=int, default=4)
-    parser.add_argument("--reset", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--n", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--levels", default=",".join(LEVELS))
-    parser.add_argument("--out", default="results/observables/runs_p3")
+    parser.add_argument("--out", default="results/observable_sets/data/p3")
     parser.add_argument("--quick", action="store_true", help="smoke test: short series, 2 levels, 3 budgets")
     args = parser.parse_args()
 
@@ -294,10 +269,9 @@ if __name__ == "__main__":
     budgets = (1_000, 100_000, None) if args.quick else obs.BUDGETS
     length = 600 if args.quick else obs.LENGTH
     t0 = time.time()
-    rows, feat_rows = run(args.n, bool(args.reset), args.seed, length, levels, budgets)
+    rows, feat_rows = run(args.n, args.seed, length, levels, budgets)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    tag = f"n{args.n}_reset{args.reset}_seed{args.seed}"
-    rows.to_csv(out / f"capacity_{tag}.csv", index=False)
-    feat_rows.to_csv(out / f"features_{tag}.csv", index=False)
-    print(f"done {tag} in {time.time() - t0:.0f}s -> {out}", flush=True)
+    rows.to_csv(out / f"capacity_n{args.n}_seed{args.seed}.csv", index=False)
+    feat_rows.to_csv(out / f"features_n{args.n}_seed{args.seed}.csv", index=False)
+    print(f"done n{args.n}_seed{args.seed} in {time.time() - t0:.0f}s -> {out}", flush=True)

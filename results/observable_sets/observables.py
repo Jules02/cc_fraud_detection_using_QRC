@@ -1,34 +1,34 @@
-"""Observable sets under shot, gate and readout noise: what more observables buy and what they cost.
+"""P2: memory capacity of observable sets under shot, gate and readout noise (input reset on).
 
-One run = one (n qubits, input reset, seed). Reservoir: TFIM with linear couplings, time 1, 2 Trotter steps (the
-arm B reservoir), 1 input qubit, angle encoding RY(pi u). Two tasks on the same reservoir:
+One run = one (n qubits, seed). Reservoir: the CLI's TFIM (`--hamiltonian tfim`: H = sum J_ij X_i X_j + sum Z_i,
+J_ij ~ U(0, 1) on a chain, evolution time 1, 2 Trotter steps), 1 input qubit with angle encoding RY(pi u), the
+input qubit reset before every step. Task: short-term memory with i.i.d. uniform inputs, target u_{t-d} for
+d = 0..L-1, memory capacity MC = sum_d C(d), C(d) = corr(y_hat, y)^2 on the test windows, ridge readout with alpha
+chosen per delay on the last 20 % of the training windows.
 
-- STM: i.i.d. uniform inputs, target u_{t-d} for d = 0..L-1, memory capacity MC = sum_d C(d).
-- Parity: i.i.d. bits, target u_{t-d} XOR u_{t-d-1} for d = 0..L-2, parity capacity PC = sum_d C(d)
-  (nonlinear mixing of two inputs).
-C(d) = corr(y_hat, y)^2 on the test windows, ridge readout with alpha chosen on the last 20 % of training.
+Noise (NOISE). Density matrices are simulated gate by gate (the reservoir transpiled to rx/ry/rz/rzz, the native
+spin-qubit gate set). Every gate is followed by a depolarizing channel on its qubits whose average gate infidelity
+is the level's 1q / 2q infidelity (lambda = infidelity * d / (d - 1)), so a Pauli string on the gate's qubits
+shrinks by (1 - lambda). The input reset prepares |1> with the readout flip probability. Measurement: the hardware
+only reads Z, so a setting is (frame unitary V, then Z on every qubit); qubits measured in X/Y or a random frame
+get one extra noisy 1q gate before readout, and every outcome bit flips with the readout probability (no
+mitigation).
 
-Noise (NOISE). The density matrices are simulated gate by gate (the reservoir transpiled to rx/ry/rz/rzz, the
-basis spin-qubit hardware runs natively). Every gate is followed by a depolarizing channel on its qubits whose
-average gate infidelity is the level's 1q / 2q infidelity (lambda = infidelity * d / (d - 1)), so a Pauli string of
-weight w on the gate's qubits shrinks by (1 - lambda). The input reset prepares |1> with the readout flip
-probability. Measurement: the hardware only reads Z, so a setting is (frame unitary V, then Z on every qubit).
-Qubits measured in X/Y or in a random frame get one extra noisy 1q gate before readout. Every outcome bit then
-flips with the readout probability (no mitigation).
-
-Observable sets (pauli_settings). A setting gives every Z-type string in its frame for free:
-- Z-w1 .. Z-w(n-1), Z-strings: Z strings up to weight k / all weights, 1 setting (native).
-- Z-strings+mix: one more (noisy) reservoir application before the Z readout, 1 setting (native, depth for bases).
-- frames-2/3: Z-strings in the Z frame plus 1/2 fixed Haar-random single-qubit frames (2/3 settings).
-- XYZ (local), XYZ-strings (3 settings), XYZ+XYZ-2body (9, nearest neighbour), all-Pauli (3^n, n = 4 only).
+Observable sets (pauli_settings); a setting gives every Z-type string of its frame for free:
+- Z-w1: local Z (n features), Z-strings: every Z string (2^n - 1), both 1 setting;
+- frames-3: Z-strings in the Z frame and in 2 fixed Haar-random single-qubit frames (3 settings);
+- XYZ-strings: every single-letter string X.., Y.., Z.. (3 settings);
+- XYZ+XYZ-2body: local X/Y/Z plus the 9 nearest-neighbour two-body products (9 settings);
+- all-Pauli: full tomography, 3^n settings (n = 4 only).
 
 Shots: a budget of B shots per window is split evenly over the settings, multinomial sampling per window and
-setting (features of one setting share the counts), train and test both sampled.
+setting (features of one setting share the counts), train and test both sampled. Every (level, set, budget) cell
+draws from its own seeded stream, so a cell's numbers do not depend on which other cells are run.
 
 Usage:
-    python results/observables/observables.py --check
-    python results/observables/observables.py --n 4 --reset 1 --seed 42 --out results/observables/runs
-    python results/observables/observables.py --n 4 --reset 1 --seed 42 --quick   (smoke test)
+    python results/observable_sets/observables.py --check
+    python results/observable_sets/observables.py --n 5 --seed 42 --out results/observable_sets/data/p2
+    python results/observable_sets/observables.py --n 5 --seed 42 --quick   (smoke test)
 """
 import argparse
 import itertools
@@ -57,9 +57,10 @@ BUDGETS = (100, 300, 1_000, 3_000, 10_000, 30_000, 100_000, 1_000_000, None)  # 
 ALPHAS = np.logspace(-6, 4, 11)
 MAX_PAULIS = 255  # all-Pauli only where 4^n - 1 <= this (n = 4)
 NATIVE = ["rx", "ry", "rz", "rzz"]
+SETS = ("Z-w1", "Z-strings", "frames-3", "XYZ-strings", "XYZ+XYZ-2body", "all-Pauli")
 
-# name -> (2q gate infidelity, 1q gate infidelity, readout flip probability). "2q2" brackets current spin-qubit
-# hardware (98 % 2q, 99.6 % 1q, 99.93 % readout); "2q2-ro1" is a pessimistic readout check.
+# name -> (2q gate infidelity, 1q gate infidelity, readout flip probability). "2q2" is Quobly's current device
+# (98 % 2q, 99.6 % 1q, 99.93 % readout); "2q2-ro1" is the same with 1 % readout error.
 NOISE = {
     "ideal": (0.0, 0.0, 0.0),
     "2q0.5": (0.005, 0.001, 0.0007),
@@ -69,6 +70,12 @@ NOISE = {
 }
 
 LETTERS = string.ascii_lowercase
+
+
+def cell_rng(seed, n, level_id, name, budget):
+    """Independent stream per (seed, n, noise level, observable set, budget)."""
+    b = len(BUDGETS) - 1 if budget is None else BUDGETS.index(budget)
+    return np.random.default_rng([seed, n, level_id, SETS.index(name), b])
 
 
 # ---------------------------------------------------------------- density-matrix simulation
@@ -147,15 +154,16 @@ def ry_batch(theta):
     return np.stack([np.stack([c, -s], -1), np.stack([s, c], -1)], -2).astype(complex)
 
 
-def density_matrices(windows, ops, n, reset, noise):
-    """Final state of every window, (M, 2^n, 2^n). Qubit 0 is the input qubit."""
+def density_matrices(windows, ops, n, noise):
+    """Final state of every window, (M, 2^n, 2^n). Qubit 0 is the input qubit, reset before every step after the
+    first (prepared in |1> with the readout flip probability)."""
     p2, p1, p_ro = noise
     D = 2 ** n
     M = windows.shape[0]
     rho = np.zeros((M, D, D), complex)
     rho[:, 0, 0] = 1
     for t in range(windows.shape[1]):
-        if reset and t > 0:
+        if t > 0:
             r = rho.reshape(M, D // 2, 2, D // 2, 2)
             tr = r[:, :, 0, :, 0] + r[:, :, 1, :, 1]
             rho = np.zeros_like(rho)
@@ -195,7 +203,7 @@ def basis_frame(basis):
 
 
 def qwc_settings(paulis):
-    """Qubit-wise-commuting grouping -> [(key, V, rotated qubits, group, state)]."""
+    """Qubit-wise-commuting grouping -> [(key, V, rotated qubits, group)]."""
     out = []
     for group in paulis.group_qubit_wise_commuting():
         basis = ["Z"] * paulis.num_qubits
@@ -205,29 +213,25 @@ def qwc_settings(paulis):
                     basis[-(q + 1)] = str(p[q])
         basis = "".join(basis)
         V, rotated = basis_frame(basis)
-        out.append((basis, V, rotated, group, "final"))
+        out.append((basis, V, rotated, group))
     return out
 
 
 def pauli_settings(n, seed):
-    """Observable set name -> list of settings (key, V, rotated qubits, group, state). `group` lists the Paulis
-    read in that setting, written in its measurement frame; state is "final" or "mix"."""
+    """Observable set name -> list of settings (key, V, rotated qubits, group), in SETS order. `group` lists the
+    Paulis read in that setting, written in its measurement frame."""
     I = np.eye(2 ** n)
     everything = tuple(range(n))
     z_all = strings("Z", n)
-    sets = {f"Z-w{k}": [("Z", I, (), strings("Z", n, k), "final")] for k in range(1, n)}
-    sets["Z-strings"] = [("Z", I, (), z_all, "final")]
-    sets["Z-strings+mix"] = [("mix:Z", I, (), z_all, "mix")]
+    sets = {"Z-w1": [("Z", I, (), strings("Z", n, 1))], "Z-strings": [("Z", I, (), z_all)]}
     rng = np.random.default_rng(10_000 + seed)
     frames = []
     for i in range(2):
         V = np.array([[1.0]])
         for _ in range(n):  # kron builds qubit n-1 first = most significant
             V = np.kron(V, random_unitary(2, seed=rng).data)
-        frames.append((f"frame{i}", V, everything, z_all, "final"))
-    sets["frames-2"] = sets["Z-strings"] + frames[:1]
+        frames.append((f"frame{i}", V, everything, z_all))
     sets["frames-3"] = sets["Z-strings"] + frames
-    sets["XYZ"] = qwc_settings(build_observables("XYZ", n))
     sets["XYZ-strings"] = qwc_settings(PauliList(list(strings("X", n)) + list(strings("Y", n)) + list(z_all)))
     sets["XYZ+XYZ-2body"] = qwc_settings(build_observables("XYZ+XYZ-2body", n))
     if 4 ** n - 1 <= MAX_PAULIS:
@@ -265,7 +269,7 @@ def eigenvalues(group, n):
 
 def features(probs, settings, n, shots, rng):
     cols = []
-    for key, _, _, group, _ in settings:
+    for key, _, _, group in settings:
         p = probs[key]
         if shots is not None:
             p = rng.multinomial(shots, p) / shots
@@ -274,7 +278,7 @@ def features(probs, settings, n, shots, rng):
 
 
 def weights(settings):
-    return np.array([int(np.sum(p.x | p.z)) for _, _, _, group, _ in settings for p in group])
+    return np.array([int(np.sum(p.x | p.z)) for _, _, _, group in settings for p in group])
 
 
 # ---------------------------------------------------------------- readout
@@ -283,14 +287,12 @@ def ridge_capacity(X_train, Y_train, X_test, Y_test):
     """Per-target capacity corr(y_hat, y)^2, alpha chosen per target on the last 20 % of the training set."""
     def fit(X, Y):
         mu, sd = X.mean(0), X.std(0)
-        # constant columns (e.g. odd-weight strings on bit inputs, exact) would standardize rounding noise to O(1)
-        sd[sd < 1e-9] = np.inf
+        sd[sd < 1e-9] = np.inf  # a constant column would otherwise standardize rounding noise to O(1)
         Z = (X - mu) / sd
         try:
             U_, S, Vt = np.linalg.svd(Z, full_matrices=False)
         except np.linalg.LinAlgError:  # OpenBLAS's gesdd occasionally fails to converge; gesvd is slower but robust
-            print(f"  svd fallback to gesvd: shape {Z.shape}, finite {np.isfinite(Z).all()}, "
-                  f"max |z| {np.abs(Z).max():.3g}, min sd {sd.min():.3g}", flush=True)
+            print(f"  svd fallback to gesvd: shape {Z.shape}", flush=True)
             U_, S, Vt = scipy.linalg.svd(Z, full_matrices=False, lapack_driver="gesvd")
         UtY = U_.T @ (Y - Y.mean(0))
         return [(mu, sd, Vt.T @ ((S / (S ** 2 + a))[:, None] * UtY), Y.mean(0)) for a in ALPHAS]
@@ -312,107 +314,100 @@ def ridge_capacity(X_train, Y_train, X_test, Y_test):
     return C, ALPHAS[best]
 
 
-# ---------------------------------------------------------------- tasks and run
+# ---------------------------------------------------------------- task and run
 
-def task_data(task, seed, length):
-    """Windows (M, L, 1) and targets (M, n_targets), split in time order."""
-    rng = np.random.default_rng([seed, 0 if task == "stm" else 1])
-    u = rng.uniform(0, 1, length) if task == "stm" else rng.integers(0, 2, length).astype(float)
+def task_data(seed, length):
+    """Short-term memory windows (M, L, 1) and targets (M, L), column d = u_{t-d}, split in time order."""
+    u = np.random.default_rng([seed, 0]).uniform(0, 1, length)
     X = sliding_windows(u, L)
-    if task == "stm":
-        Y = X[:, ::-1]  # column d = u_{t-d}
-    else:
-        Y = np.stack([(X[:, L - 1 - d] + X[:, L - 2 - d]) % 2 for d in range(L - 1)], 1)
+    Y = X[:, ::-1]
     cut = int(len(X) * (1 - TEST_SPLIT))
     return X[:cut, :, None], Y[:cut], X[cut:, :, None], Y[cut:]
 
 
 def make_reservoir(n, seed):
+    """The CLI's `--hamiltonian tfim` reservoir (time 1, 2 Trotter steps)."""
     return HamiltonianReservoir(tfim(n, rng=seed), num_input_qubits=1, time=1.0, steps=2)
 
 
-def run(n, reset, seed, length, levels, budgets):
-    reservoir = make_reservoir(n, seed)
-    ops = reservoir_ops(reservoir, n)
-    sets = pauli_settings(n, seed)
-    rng = np.random.default_rng([seed, n, reset])
+def evaluate(probs, sets, n, seed, level, level_id, budgets, Y_train, Y_test):
+    """Capacity rows and per-weight feature-spread rows for every (set, budget), from the outcome distributions.
+    `level_id` (an integer unique to the noise level) seeds the per-cell sampling streams."""
     rows, feat_rows = [], []
-    for task in ("stm", "parity"):
-        X_train, Y_train, X_test, Y_test = task_data(task, seed, length)
-        for level in levels:
-            t0 = time.time()
-            noise = NOISE[level]
-            states = {}
-            for split, X in (("train", X_train), ("test", X_test)):
-                final = density_matrices(X, ops, n, reset, noise)
-                states[split] = {"final": final, "mix": apply_ops(final, ops, noise, n)}
-            probs = {split: {} for split in states}
-            for settings in sets.values():
-                for key, V, rotated, _, state in settings:
-                    for split in states:
-                        if key not in probs[split]:
-                            probs[split][key] = outcome_probs(states[split][state], V, rotated, noise, n)
-            for name, settings in sets.items():
-                n_settings = len(settings)
-                exact = features(probs["train"], settings, n, None, rng)
-                w = weights(settings)
-                for weight in np.unique(w):
-                    feat_rows.append(dict(task=task, n=n, reset=reset, seed=seed, noise=level, observables=name,
-                                          weight=int(weight), n_features=int((w == weight).sum()),
-                                          median_std=float(np.median(exact[:, w == weight].std(0)))))
-                for budget in budgets:
-                    shots = None if budget is None else budget // n_settings
-                    if shots == 0:
-                        continue
-                    F_train = features(probs["train"], settings, n, shots, rng)
-                    F_test = features(probs["test"], settings, n, shots, rng)
-                    C, alphas = ridge_capacity(F_train, Y_train, F_test, Y_test)
-                    chance, _ = ridge_capacity(F_train, Y_train, F_test, rng.permutation(Y_test))
-                    for d in range(Y_train.shape[1]):
-                        rows.append(dict(task=task, n=n, reset=reset, seed=seed, noise=level, observables=name,
-                                         n_features=F_train.shape[1], n_settings=n_settings,
-                                         budget=np.inf if budget is None else budget, shots_per_setting=shots,
-                                         delay=d, capacity=C[d], chance=chance[d], alpha=alphas[d]))
-            print(f"n={n} reset={reset} seed={seed} {task} {level}: {time.time() - t0:.1f}s", flush=True)
+    for name, settings in sets.items():
+        n_settings = len(settings)
+        exact = features(probs["train"], settings, n, None, None)
+        w = weights(settings)
+        for weight in np.unique(w):
+            feat_rows.append(dict(n=n, seed=seed, noise=level, observables=name, weight=int(weight),
+                                  n_features=int((w == weight).sum()),
+                                  median_std=float(np.median(exact[:, w == weight].std(0)))))
+        for budget in budgets:
+            shots = None if budget is None else budget // n_settings
+            if shots == 0:
+                continue
+            rng = cell_rng(seed, n, level_id, name, budget)
+            F_train = features(probs["train"], settings, n, shots, rng)
+            F_test = features(probs["test"], settings, n, shots, rng)
+            C, alphas = ridge_capacity(F_train, Y_train, F_test, Y_test)
+            chance, _ = ridge_capacity(F_train, Y_train, F_test, rng.permutation(Y_test))
+            for d in range(Y_train.shape[1]):
+                rows.append(dict(n=n, seed=seed, noise=level, observables=name, n_features=F_train.shape[1],
+                                 n_settings=n_settings, budget=np.inf if budget is None else budget,
+                                 shots_per_setting=shots, delay=d, capacity=C[d], chance=chance[d], alpha=alphas[d]))
+    return rows, feat_rows
+
+
+def run(n, seed, length, levels, budgets):
+    ops = reservoir_ops(make_reservoir(n, seed), n)
+    sets = pauli_settings(n, seed)
+    keys = {key: (V, rot) for s in sets.values() for key, V, rot, _ in s}
+    X_train, Y_train, X_test, Y_test = task_data(seed, length)
+    rows, feat_rows = [], []
+    for level in levels:
+        t0 = time.time()
+        noise = NOISE[level]
+        probs = {}
+        for split, X in (("train", X_train), ("test", X_test)):
+            rho = density_matrices(X, ops, n, noise)
+            probs[split] = {key: outcome_probs(rho, V, rot, noise, n) for key, (V, rot) in keys.items()}
+        r, f = evaluate(probs, sets, n, seed, level, list(NOISE).index(level), budgets, Y_train, Y_test)
+        rows += r
+        feat_rows += f
+        print(f"n={n} seed={seed} {level}: {time.time() - t0:.1f}s", flush=True)
     return pd.DataFrame(rows), pd.DataFrame(feat_rows)
 
 
 def check():
-    """Noiseless gate-by-gate density matrices vs NumpyBackend, outcome distributions vs Tr(P rho), and the
-    depolarizing channel's action on Paulis."""
-    for n, reset in itertools.product((4, 5), (False, True)):
-        X = task_data("stm", 42, 60)[0][:20]
+    """Noiseless gate-by-gate density matrices vs NumpyBackend (reset on), outcome distributions vs Tr(P rho), and
+    the depolarizing channel's action on Paulis."""
+    X = task_data(42, 60)[0][:20]
+    for n in (4, 5):
         reservoir = make_reservoir(n, 42)
         obs = build_observables("XYZ+XYZ-2body", n)
-        ref = QRCProtocol(AngleEncoding(num_qubits=1), reservoir, obs, NumpyBackend(reset_inputs=reset)).run(X)
-        rho = density_matrices(X, reservoir_ops(reservoir, n), n, reset, NOISE["ideal"])
-        ours = np.einsum("pab,mba->mp", obs.to_matrix(array=True), rho).real
-        err = np.abs(ours - ref).max()
-        assert err < 1e-8, f"density matrices disagree with NumpyBackend (n={n}, reset={reset}): {err:.2e}"
+        ref = QRCProtocol(AngleEncoding(num_qubits=1), reservoir, obs, NumpyBackend(reset_inputs=True)).run(X)
+        rho = density_matrices(X, reservoir_ops(reservoir, n), n, NOISE["ideal"])
+        err = np.abs(np.einsum("pab,mba->mp", obs.to_matrix(array=True), rho).real - ref).max()
+        assert err < 1e-8, f"density matrices disagree with NumpyBackend (n={n}): {err:.2e}"
         for name, settings in pauli_settings(n, 42).items():
-            if any(state == "mix" for *_, state in settings):
-                continue
-            probs = {key: outcome_probs(rho, V, rot, NOISE["ideal"], n) for key, V, rot, _, _ in settings}
-            # QWC groups hold the Paulis themselves; frame groups hold Z strings P, whose observable is V^dagger P V
-            def observable(V, group):
+            probs = {key: outcome_probs(rho, V, rot, NOISE["ideal"], n) for key, V, rot, _ in settings}
+
+            def observable(V, group):  # QWC groups hold Paulis; frame groups hold Z strings P, observable V^† P V
                 P = group.to_matrix(array=True)
                 return P if group.x.any() else np.einsum("xa,pxy,yb->pab", V.conj(), P, V)
 
             direct = np.concatenate([np.einsum("pab,mba->mp", observable(V, group), rho).real
-                                     for _, V, _, group, _ in settings], 1)
+                                     for _, V, _, group in settings], 1)
             err = np.abs(features(probs, settings, n, None, None) - direct).max()
             assert err < 1e-8, f"outcome distributions disagree with Tr(P rho) for {name}: {err:.2e}"
-    # depolarizing on qubits (1, 2) shrinks Paulis supported there by (1 - lam), leaves others alone
-    rho = density_matrices(task_data("stm", 42, 40)[0][:5], reservoir_ops(make_reservoir(4, 42), 4), 4, False,
-                           NOISE["ideal"])
+    rho = density_matrices(X[:5], reservoir_ops(make_reservoir(4, 42), 4), 4, NOISE["ideal"])
     lam = 0.1
-    noisy = depolarize(rho, (1, 2), lam, 4)
+    noisy = depolarize(rho, (1, 2), lam, 4)  # shrinks Paulis touching qubits 1, 2 by (1 - lam), leaves others
     for label in ("IXYI", "ZXII", "IIIZ"):
         P = Pauli(label).to_matrix()
         before = np.einsum("ab,mba->m", P, rho).real
         after = np.einsum("ab,mba->m", P, noisy).real
-        expected = before * ((1 - lam) if label != "IIIZ" else 1)
-        assert np.allclose(after, expected), f"depolarize wrong on {label}"
+        assert np.allclose(after, before * ((1 - lam) if label != "IIIZ" else 1)), f"depolarize wrong on {label}"
     assert np.allclose(np.trace(noisy, axis1=1, axis2=2), 1)
     print("check: gate-level simulation matches NumpyBackend, settings match Tr(P rho), depolarizing OK", flush=True)
 
@@ -420,11 +415,10 @@ def check():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--check", action="store_true", help="run the validation checks and exit")
-    parser.add_argument("--n", type=int, default=4, help="total qubits (1 input + n-1 memory)")
-    parser.add_argument("--reset", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--n", type=int, default=5, help="total qubits (1 input + n-1 memory)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--levels", default=",".join(NOISE), help="comma-separated noise levels")
-    parser.add_argument("--out", default="results/observables/runs")
+    parser.add_argument("--out", default="results/observable_sets/data/p2")
     parser.add_argument("--quick", action="store_true", help="smoke test: short series, 2 levels, 3 budgets")
     args = parser.parse_args()
 
@@ -435,10 +429,9 @@ if __name__ == "__main__":
     budgets = (1_000, 100_000, None) if args.quick else BUDGETS
     length = 600 if args.quick else LENGTH
     t0 = time.time()
-    rows, feat_rows = run(args.n, bool(args.reset), args.seed, length, levels, budgets)
+    rows, feat_rows = run(args.n, args.seed, length, levels, budgets)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    tag = f"n{args.n}_reset{args.reset}_seed{args.seed}"
-    rows.to_csv(out / f"capacity_{tag}.csv", index=False)
-    feat_rows.to_csv(out / f"features_{tag}.csv", index=False)
-    print(f"done {tag} in {time.time() - t0:.0f}s -> {out}", flush=True)
+    rows.to_csv(out / f"capacity_n{args.n}_seed{args.seed}.csv", index=False)
+    feat_rows.to_csv(out / f"features_n{args.n}_seed{args.seed}.csv", index=False)
+    print(f"done n{args.n}_seed{args.seed} in {time.time() - t0:.0f}s -> {out}", flush=True)

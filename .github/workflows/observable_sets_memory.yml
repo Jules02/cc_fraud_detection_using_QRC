@@ -1,0 +1,87 @@
+name: observable_sets_memory
+
+# Memory-task data of results/observable_sets (P2: observables.py, P3: spinpulse_p3.py), one job per (seed, n),
+# merged into one artifact. Then, locally:
+#   gh run download <run-id> -n p2-data -D results/observable_sets/data/p2     (or p3-data -> data/p3)
+#   python results/observable_sets/report_figures.py
+# The report uses P2 at n = 4,5 and P3 at n = 5.
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "p2 (gate depolarizing) or p3 (SpinPulse)"
+        type: choice
+        options: [p2, p3]
+        default: p2
+      seeds:
+        description: "comma-separated seeds"
+        default: "42,43,44,45,46,47,48,49,50,51"
+      n_qubits:
+        description: "comma-separated register sizes (report: 4,5 for p2, 5 for p3)"
+        default: "4,5"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      seeds: ${{ steps.matrix.outputs.seeds }}
+      n: ${{ steps.matrix.outputs.n }}
+      script: ${{ steps.matrix.outputs.script }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .
+      - id: matrix
+        name: Build the matrix
+        run: |
+          echo "seeds=[${{ inputs.seeds }}]" >> "$GITHUB_OUTPUT"
+          echo "n=[${{ inputs.n_qubits }}]" >> "$GITHUB_OUTPUT"
+          echo "script=${{ inputs.phase == 'p2' && 'observables.py' || 'spinpulse_p3.py' }}" >> "$GITHUB_OUTPUT"
+      - name: Validate the simulator
+        run: python results/observable_sets/${{ steps.matrix.outputs.script }} --check
+
+  sweep:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ${{ fromJSON(needs.check.outputs.seeds) }}
+        n: ${{ fromJSON(needs.check.outputs.n) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .
+      - name: Run
+        run: >
+          python results/observable_sets/${{ needs.check.outputs.script }}
+          --n ${{ matrix.n }} --seed ${{ matrix.seed }} --out out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.phase }}-n${{ matrix.n }}-seed${{ matrix.seed }}
+          path: out/
+
+  merge:
+    needs: sweep
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ inputs.phase }}-n*-seed*
+          merge-multiple: true
+          path: data/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.phase }}-data
+          path: data/

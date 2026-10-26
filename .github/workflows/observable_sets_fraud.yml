@@ -1,9 +1,10 @@
-name: fraud_p4
+name: observable_sets_fraud
 
-# P4 (results/observables/fraud_p4.py): fraud AP of the observable sets under shot and gate noise, one job per seed,
-# then one job that merges the CSVs. The dataset is regenerated on the runner with the recipe of
-# data/sc3_c1000_x6/README.md (identical to the local copy, ~1 min), so no data is uploaded. Download with:
-#   gh run download <run-id> -n fraud_p4-analysis -D results/observables/p4
+# Fraud data of results/observable_sets (P4: fraud_p4.py), one job per seed, merged into one artifact. The dataset is
+# regenerated on the runner with the recipe of data/sc3_c1000_x6/README.md (identical to the shared copy, ~1 min),
+# so no data is uploaded. Then, locally:
+#   gh run download <run-id> -n p4-data -D results/observable_sets/data/p4
+#   python results/observable_sets/report_figures.py
 
 on:
   workflow_dispatch:
@@ -11,9 +12,6 @@ on:
       seeds:
         description: "comma-separated seeds"
         default: "42,43,44,45,46,47,48,49,50,51"
-      levels:
-        description: "comma-separated noise levels (observables.NOISE)"
-        default: "ideal,2q1,2q2"
 
 jobs:
   setup:
@@ -52,34 +50,25 @@ jobs:
           split_and_save(tx, validation_start="2025-09-13", test_start="2025-11-06", output_dir="data/sc3_c1000_x6")
           EOF
       - name: Validate
-        run: python results/observables/fraud_p4.py --check
+        run: python results/observable_sets/fraud_p4.py --check
       - name: Run
-        run: python results/observables/fraud_p4.py --seed ${{ matrix.seed }} --levels "${{ inputs.levels }}" --out runs
+        run: python results/observable_sets/fraud_p4.py --seed ${{ matrix.seed }} --out out
       - uses: actions/upload-artifact@v4
         with:
           name: p4-seed${{ matrix.seed }}
-          path: runs/
+          path: out/
 
-  analyze:
+  merge:
     needs: sweep
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - run: pip install -e .
       - uses: actions/download-artifact@v4
         with:
           pattern: p4-seed*
           merge-multiple: true
-          path: runs/
-      - run: python results/observables/analyze_p4.py --runs runs --out analysis
-      - run: cp -r runs analysis/runs
+          path: data/
       - uses: actions/upload-artifact@v4
         with:
-          name: fraud_p4-analysis
-          path: analysis/
+          name: p4-data
+          path: data/

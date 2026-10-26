@@ -1,8 +1,8 @@
-"""P4: fraud detection (arm B) with the observable sets of P2, under shot and gate noise.
+"""P4: fraud detection (arm B) with the observable sets of P2, under shot and gate noise (input reset on).
 
 Data, windowing, encoding, reservoir, readout, decision threshold and metrics are the CLI's (experiments.cli), as in
 results/fraud_sweep: data/sc3_c1000_x6, feature set 1 (log amount), L = 10, 1 input + 3 memory qubits, the CLI's
-TFIM (`--hamiltonian tfim`, 2 Trotter steps, the P2/P3 reservoir), input reset. The backend is replaced by one that
+TFIM (`--hamiltonian tfim`, time 1, 2 Trotter steps, the P2/P3 reservoir), input reset. The backend is replaced by one that
 simulates density matrices under the P2 noise model (observables.NOISE: depolarizing after every native gate,
 reset preparation and readout flips, one noisy 1q gate per rotated qubit before readout) and keeps the outcome
 distribution of every measurement setting. Each readout variant (observable set x shot budget) is derived from one
@@ -13,8 +13,8 @@ observables.apply_ops on the D^2 basis matrices), the encoding as a batched unit
 qubit; --check compares this with the gate-by-gate simulation.
 
 Usage (from the repository root, data in data/sc3_c1000_x6):
-    python results/observables/fraud_p4.py --check
-    python results/observables/fraud_p4.py --seed 42 --out results/observables/runs_p4
+    python results/observable_sets/fraud_p4.py --check
+    python results/observable_sets/fraud_p4.py --seed 42 --out results/observable_sets/data/p4
 """
 import argparse
 import sys
@@ -89,7 +89,7 @@ class NoisyBackend(NumpyBackend):
         ops = obs.reservoir_ops(reservoir, n)
         S = None if self.gate_by_gate else superoperator(ops, self.noise, n)
         sets = {k: v for k, v in obs.pauli_settings(n, self.seed).items() if k in SETS}
-        keys = {key: (V, rot) for s in sets.values() for key, V, rot, _, _ in s}
+        keys = {key: (V, rot) for s in sets.values() for key, V, rot, _ in s}
         P = observables.to_matrix(array=True)
         rng = np.random.default_rng((self.seed, len(self.variants)))
         input_width = encoder.input_width(windows.shape[2])
@@ -177,7 +177,7 @@ if __name__ == "__main__":
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--levels", default=",".join(LEVELS))
-    parser.add_argument("--out", default="results/observables/runs_p4")
+    parser.add_argument("--out", default="results/observable_sets/data/p4")
     args = parser.parse_args()
     if args.check:
         check()
