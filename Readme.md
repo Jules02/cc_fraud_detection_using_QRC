@@ -376,9 +376,11 @@ The CLI is the recommended entry point. These scripts are still useful for explo
 | `experiments/compare_decision_policies.py` | Fixed 0.5 threshold vs. validation-selected thresholds (several minimum recalls) vs. Card Precision@K (several K), on the same model scores |
 | `experiments/run_data.py`           | Data → features → analysis plots → model input, from the daily split files     |
 | `experiments/dataset_analysis.py`   | Exploration and feature analysis of a simulated dataset                        |
-| `experiments/run_benchmarks.py`     | QRC on synthetic tasks with known answers (memory, parity, NARMA10)            |
+| `experiments/run_benchmarks.py`     | QRC on synthetic tasks with known answers (memory, parity, NARMA10, IPC)       |
 
 Run them as modules from the repository root, e.g. `python -m experiments.run_benchmarks`.
+For IPC, `--ipc-reservoir-depth` sets the random-circuit depth or Hamiltonian
+Trotter steps, depending on the selected reservoir.
 
 ## Using the package in your own code
 

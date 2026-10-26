@@ -1,0 +1,38 @@
+{
+  "validation": {
+    "f1_score": 0.3062572872133696,
+    "precision": 0.18937105190881626,
+    "recall": 0.8001160429358862,
+    "false_positive_rate": 0.11978976419497545,
+    "roc_auc": 0.8929821028179551,
+    "average_precision": 0.7180308238447859,
+    "matthews_corr_coef": 0.3513876524448972,
+    "balanced_accuracy": 0.8401631393704554,
+    "threshold_used": 0.0233305643077157,
+    "card_precision_top_k": 0.34148148148148144,
+    "average_precision_amount": 0.9437936949413133,
+    "average_precision_terminal": 0.005868557024800153,
+    "average_precision_customer": 0.571524556807394
+  },
+  "test": {
+    "f1_score": 0.30924475744993957,
+    "precision": 0.1914741295151318,
+    "recall": 0.803386127799017,
+    "false_positive_rate": 0.1212106428857168,
+    "roc_auc": 0.896554135768024,
+    "average_precision": 0.7268025442939018,
+    "matthews_corr_coef": 0.3538487263533111,
+    "balanced_accuracy": 0.8410877424566501,
+    "threshold_used": 0.0233305643077157,
+    "card_precision_top_k": 0.3578571428571428,
+    "average_precision_amount": 0.9515788419729764,
+    "average_precision_terminal": 0.005843520169740364,
+    "average_precision_customer": 0.5591866467612254
+  },
+  "classical_model": "rff",
+  "random_map_width": 5,
+  "random_map_scale": 1.0,
+  "random_map_seed": 43,
+  "rff_gamma": 1.0,
+  "classical_seconds": 812.4201918329927
+}

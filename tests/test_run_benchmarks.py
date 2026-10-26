@@ -5,10 +5,19 @@ runs in seconds; they are big enough to tell a working reservoir from noise,
 not to measure one.
 """
 
+import sys
+
 import numpy as np
 import pytest
 
-from experiments.run_benchmarks import run_memory_benchmark, run_narma_benchmark, run_parity_benchmark
+from experiments.run_benchmarks import (
+    build_protocol,
+    main,
+    run_ipc_benchmark,
+    run_memory_benchmark,
+    run_narma_benchmark,
+    run_parity_benchmark,
+)
 from qrc.benchmarks import MemoryTask
 from qrc.readout import RegressionReadout
 
@@ -46,6 +55,67 @@ def test_narma_benchmark_runs():
     metrics = run_narma_benchmark(window_length=10, length=400, n_mem_qubits=2, depth=1)
     assert np.isfinite(metrics["nmse"])
     assert np.isfinite(metrics["linear_baseline_nmse"])
+
+
+def test_ipc_benchmark_runs_with_multi_output_readout():
+    metrics = run_ipc_benchmark(
+        length=120,
+        window_length=4,
+        max_degree=2,
+        max_delay=3,
+        washout=10,
+        seed=42,
+        n_mem_qubits=2,
+        depth=1,
+    )
+    assert set(metrics) == {"degree_1", "degree_2", "total_capacity"}
+    assert all(np.isfinite(capacity) and capacity >= 0 for capacity in metrics.values())
+    assert metrics["total_capacity"] == pytest.approx(
+        metrics["degree_1"] + metrics["degree_2"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("hamiltonian", "protocol_argument"),
+    [("random", "depth"), ("tfim", "steps")],
+)
+def test_ipc_cli_maps_reservoir_depth_to_setup(
+    monkeypatch, hamiltonian, protocol_argument
+):
+    calls = []
+
+    def fake_run_ipc_benchmark(**kwargs):
+        calls.append(kwargs)
+        return {"total_capacity": 0.0}
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_benchmarks",
+            "--tasks",
+            "ipc",
+            "--backend",
+            "estimator-exact",
+            "--hamiltonian",
+            hamiltonian,
+            "--ipc-reservoir-depth",
+            "4",
+        ],
+    )
+    monkeypatch.setattr(
+        "experiments.run_benchmarks.run_ipc_benchmark", fake_run_ipc_benchmark
+    )
+
+    main()
+
+    assert calls[0][protocol_argument] == 4
+
+
+def test_build_hamiltonian_protocol_uses_requested_trotter_steps():
+    protocol = build_protocol(hamiltonian="tfim", steps=4)
+
+    assert protocol.reservoir.steps == 4
 
 
 @pytest.mark.parametrize("backend", ["gaussian", "shots"])
