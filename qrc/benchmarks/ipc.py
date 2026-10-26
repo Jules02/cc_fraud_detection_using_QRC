@@ -1,4 +1,4 @@
-r"""Information Processing Capacity (IPC) benchmark.
+"""Information Processing Capacity (IPC) benchmark.
 
 Measures the total computational capabilities of a reservoir across linear and
 nonlinear memory degrees using orthogonal Legendre polynomials (Dambre et al.,
@@ -207,9 +207,3 @@ class IPCTask:
 
         capacities["total_capacity"] = total_capacity
         return capacities
-
-
-if __name__ == "__main__":
-    from experiments.run_ipc import main
-
-    main()

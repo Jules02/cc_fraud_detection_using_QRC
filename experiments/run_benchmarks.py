@@ -40,6 +40,7 @@ def build_protocol(
     precision=0.05,
     seed=42,
     hamiltonian="random",
+    steps=2,
 ):
     """Build the encoder -> reservoir -> observables protocol."""
     encoder = AngleEncoding(num_qubits=n_input_qubits)
@@ -65,7 +66,7 @@ def build_protocol(
             hamiltonian=hamiltonian_operator,
             num_input_qubits=n_input_qubits,
             time=1.0,
-            steps=2,
+            steps=steps,
         )
 
     observables = build_observables(
@@ -297,6 +298,12 @@ def main():
     # IPC options
     parser.add_argument("--ipc-length", type=int, default=3000)
     parser.add_argument("--ipc-window-length", type=int, default=15)
+    parser.add_argument(
+        "--ipc-reservoir-depth",
+        type=int,
+        default=2,
+        help="random-circuit depth or Hamiltonian Trotter steps for IPC",
+    )
     parser.add_argument("--max-degree", type=int, default=3)
     parser.add_argument("--max-delay", type=int, default=10)
     parser.add_argument("--washout", type=int, default=200)
@@ -304,6 +311,8 @@ def main():
     parser.add_argument("--threshold", type=float, default=1e-3)
 
     args = parser.parse_args()
+    if args.ipc_reservoir_depth < 1:
+        parser.error("--ipc-reservoir-depth must be at least 1")
 
     for backend in args.backend:
         kwargs = {
@@ -349,6 +358,11 @@ def main():
             )
 
         if "ipc" in args.tasks:
+            reservoir_depth = (
+                {"depth": args.ipc_reservoir_depth}
+                if args.hamiltonian == "random"
+                else {"steps": args.ipc_reservoir_depth}
+            )
             ipc = run_ipc_benchmark(
                 length=args.ipc_length,
                 window_length=args.ipc_window_length,
@@ -358,6 +372,7 @@ def main():
                 test_split=args.test_split,
                 threshold=args.threshold,
                 alpha=args.alpha,
+                **reservoir_depth,
                 **kwargs,
             )
 

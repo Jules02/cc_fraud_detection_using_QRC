@@ -1,0 +1,13 @@
+/Users/pmeswani/Documents/qist/jip/code/cc_fraud_detection_using_QRC/qrc/benchmarks/ipc.py:10: SyntaxWarning: "\p" is an invalid escape sequence. Such sequences will not work in the future. Did you mean "\\p"? A raw string is also an option.
+  y^{(d)}_t = \prod_j \bar{P}_{d_j}(s_{t - \tau_j})    with    \sum_j d_j = d
+
+=== Backend: shots (precision 0.05)
+Reservoir: native-exchange
+
+Information Processing Capacity (IPC)
+{
+  "degree_1": 2.2373661014246213,
+  "degree_2": 2.0180117388293404,
+  "degree_3": 0.5174033442934004,
+  "total_capacity": 4.772781184547364
+}

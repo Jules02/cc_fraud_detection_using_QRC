@@ -1,0 +1,11 @@
+
+=== Backend: shots (precision 0.1)
+Reservoir: native-exchange
+
+Information Processing Capacity (IPC)
+{
+  "degree_1": 1.5840309966312471,
+  "degree_2": 1.1217533478334505,
+  "degree_3": 0.22364741524071252,
+  "total_capacity": 2.92943175970541
+}
