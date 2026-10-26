@@ -38,6 +38,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import scipy.linalg
 from qiskit import QuantumCircuit, transpile
 from qiskit.quantum_info import Operator, Pauli, PauliList, random_unitary
 
@@ -280,7 +281,13 @@ def ridge_capacity(X_train, Y_train, X_test, Y_test):
         mu, sd = X.mean(0), X.std(0)
         # constant columns (e.g. odd-weight strings on bit inputs, exact) would standardize rounding noise to O(1)
         sd[sd < 1e-9] = np.inf
-        U_, S, Vt = np.linalg.svd((X - mu) / sd, full_matrices=False)
+        Z = (X - mu) / sd
+        try:
+            U_, S, Vt = np.linalg.svd(Z, full_matrices=False)
+        except np.linalg.LinAlgError:  # OpenBLAS's gesdd occasionally fails to converge; gesvd is slower but robust
+            print(f"  svd fallback to gesvd: shape {Z.shape}, finite {np.isfinite(Z).all()}, "
+                  f"max |z| {np.abs(Z).max():.3g}, min sd {sd.min():.3g}", flush=True)
+            U_, S, Vt = scipy.linalg.svd(Z, full_matrices=False, lapack_driver="gesvd")
         UtY = U_.T @ (Y - Y.mean(0))
         return [(mu, sd, Vt.T @ ((S / (S ** 2 + a))[:, None] * UtY), Y.mean(0)) for a in ALPHAS]
 
