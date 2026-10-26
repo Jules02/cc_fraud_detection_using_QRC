@@ -152,3 +152,30 @@ def test_reset_matches_exact_density_matrix():
     # The backend reports its own statistical error; allow 5 of those.
     tolerance = 5 * backend.last_stderr + 1e-9
     assert np.all(np.abs(features - exact) <= tolerance)
+
+
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        dict(noise_type="pink", TJS=20.0),  # coupling (exchange) noise on the rzz pulses
+        dict(noise_type="quasistatic", TJS=20.0, dynamical_decoupling="spin-echo"),
+        dict(noise_type="pink", only_idle=True),  # frequency noise on idle qubits only
+    ],
+    ids=["coupling-noise", "coupling-noise-echo", "only-idle"],
+)
+def test_coupling_noise_and_only_idle_match_spinpulse_reference(settings):
+    config = SpinPulseConfig(T2S=100.0, noise_samples=4, seed=11, **settings)
+    backend = SpinPulseBackend(config)
+    features = backend.run_batch(WINDOWS, AngleEncoding(1), TinyReservoir(), OBSERVABLES)
+
+    # Guard: the setting under test must change the result, or the comparison proves nothing.
+    baseline = {k: v for k, v in settings.items() if k not in ("TJS", "only_idle")}
+    without = SpinPulseBackend(
+        SpinPulseConfig(T2S=100.0, noise_samples=4, seed=11, **baseline)
+    ).run_batch(WINDOWS, AngleEncoding(1), TinyReservoir(), OBSERVABLES)
+    assert not np.allclose(features, without, atol=1e-3)
+
+    expected = spinpulse_reference(backend, WINDOWS, config)
+    np.testing.assert_allclose(features, expected, atol=1e-10)
