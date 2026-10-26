@@ -228,6 +228,10 @@ __marimo__/
 !/results/armb/
 /results/armb/**/scores.npz
 /results/armb/operating_point/
+# observable-set sweep: scripts tracked, outputs come back as CI artifacts
+!/results/observables/
+/results/observables/*
+!/results/observables/*.py
 
 # Generated datasets (see Readme: download from SharePoint).
 /data/

@@ -1,0 +1,97 @@
+name: observables
+
+# Observable-set sweep (results/observables/observables.py): one job per (seed, n, reset), then one job that merges
+# the CSVs and writes tables.md / totals.csv / figures. Download with:
+#   gh run download <run-id> -n observables-analysis -D results/observables
+
+on:
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "comma-separated seeds"
+        default: "42,43,44,45,46,47,48,49,50,51"
+      n_qubits:
+        description: "comma-separated register sizes (1 input + n-1 memory)"
+        default: "4,5"
+      levels:
+        description: "comma-separated noise levels (see NOISE in observables.py)"
+        default: "ideal,2q0.5,2q1,2q2,2q2-ro1"
+      quick:
+        description: "smoke test (short series, 2 levels, 3 budgets)"
+        type: boolean
+        default: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      seeds: ${{ steps.matrix.outputs.seeds }}
+      n: ${{ steps.matrix.outputs.n }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .
+      - name: Validate the simulator
+        run: python results/observables/observables.py --check
+      - id: matrix
+        name: Build the matrix
+        run: |
+          echo "seeds=[${{ inputs.seeds }}]" >> "$GITHUB_OUTPUT"
+          echo "n=[${{ inputs.n_qubits }}]" >> "$GITHUB_OUTPUT"
+
+  sweep:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ${{ fromJSON(needs.check.outputs.seeds) }}
+        n: ${{ fromJSON(needs.check.outputs.n) }}
+        reset: [0, 1]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .
+      - name: Run
+        run: >
+          python results/observables/observables.py
+          --n ${{ matrix.n }} --reset ${{ matrix.reset }} --seed ${{ matrix.seed }}
+          --levels "${{ inputs.levels }}" --out runs
+          ${{ inputs.quick && '--quick' || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-n${{ matrix.n }}-reset${{ matrix.reset }}-seed${{ matrix.seed }}
+          path: runs/
+
+  analyze:
+    needs: sweep
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: obs-*
+          merge-multiple: true
+          path: runs/
+      - run: python results/observables/analyze.py --runs runs --out analysis
+      - run: cp -r runs analysis/runs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: observables-analysis
+          path: analysis/
