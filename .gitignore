@@ -237,7 +237,8 @@ __marimo__/
 /results/arma/**/scores.npz
 
 !/results/benchmarks/
-
+# IPC benchmark logs
+results/benchmarks/ipc/**/*.txt
 
 /results/armb/operating_point/
 
