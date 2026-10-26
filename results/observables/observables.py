@@ -241,7 +241,11 @@ def outcome_probs(rho, V, rotated, noise, n):
     _, p1, p_ro = noise
     for q in rotated:
         rho = depolarize(rho, (q,), lam_of(p1, 1), n)
-    p = np.einsum("xa,mab,xb->mx", V, rho, V.conj()).real
+    return readout(np.einsum("xa,mab,xb->mx", V, rho, V.conj()).real, p_ro, n)
+
+
+def readout(p, p_ro, n):
+    """Flip every outcome bit independently with probability p_ro, then renormalize. p is (M, 2^n)."""
     if p_ro > 0:
         flip = np.array([[1 - p_ro, p_ro], [p_ro, 1 - p_ro]])
         t = p.reshape((-1,) + (2,) * n)

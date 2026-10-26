@@ -1,12 +1,19 @@
 name: observables
 
-# Observable-set sweep (results/observables/observables.py): one job per (seed, n, reset), then one job that merges
-# the CSVs and writes tables.md / totals.csv / figures. Download with:
-#   gh run download <run-id> -n observables-analysis -D results/observables
+# Observable-set sweep: one job per (seed, n, reset), then one job that merges the CSVs and writes tables.md /
+# totals.csv / figures. `script` picks the noise model: observables.py (gate depolarizing, P2) or spinpulse_p3.py
+# (SpinPulse pulses, P3). Download with:
+#   gh run download <run-id> -n observables-analysis -D results/observables      (P2)
+#   gh run download <run-id> -n spinpulse_p3-analysis -D results/observables/p3  (P3)
 
 on:
   workflow_dispatch:
     inputs:
+      script:
+        description: "experiment script in results/observables/"
+        type: choice
+        options: [observables.py, spinpulse_p3.py]
+        default: observables.py
       seeds:
         description: "comma-separated seeds"
         default: "42,43,44,45,46,47,48,49,50,51"
@@ -14,8 +21,8 @@ on:
         description: "comma-separated register sizes (1 input + n-1 memory)"
         default: "4,5"
       levels:
-        description: "comma-separated noise levels (see NOISE in observables.py)"
-        default: "ideal,2q0.5,2q1,2q2,2q2-ro1"
+        description: "comma-separated noise levels (empty = the script's default set)"
+        default: ""
       quick:
         description: "smoke test (short series, 2 levels, 3 budgets)"
         type: boolean
@@ -36,7 +43,7 @@ jobs:
           cache-dependency-path: pyproject.toml
       - run: pip install -e .
       - name: Validate the simulator
-        run: python results/observables/observables.py --check
+        run: python results/observables/${{ inputs.script }} --check
       - id: matrix
         name: Build the matrix
         run: |
@@ -63,13 +70,13 @@ jobs:
       - run: pip install -e .
       - name: Run
         run: >
-          python results/observables/observables.py
-          --n ${{ matrix.n }} --reset ${{ matrix.reset }} --seed ${{ matrix.seed }}
-          --levels "${{ inputs.levels }}" --out runs
+          python results/observables/${{ inputs.script }}
+          --n ${{ matrix.n }} --reset ${{ matrix.reset }} --seed ${{ matrix.seed }} --out runs
+          ${{ inputs.levels != '' && format('--levels {0}', inputs.levels) || '' }}
           ${{ inputs.quick && '--quick' || '' }}
       - uses: actions/upload-artifact@v4
         with:
-          name: obs-n${{ matrix.n }}-reset${{ matrix.reset }}-seed${{ matrix.seed }}
+          name: obs-${{ inputs.script }}-n${{ matrix.n }}-reset${{ matrix.reset }}-seed${{ matrix.seed }}
           path: runs/
 
   analyze:
@@ -86,12 +93,12 @@ jobs:
       - run: pip install -e .
       - uses: actions/download-artifact@v4
         with:
-          pattern: obs-*
+          pattern: obs-${{ inputs.script }}-*
           merge-multiple: true
           path: runs/
       - run: python results/observables/analyze.py --runs runs --out analysis
       - run: cp -r runs analysis/runs
       - uses: actions/upload-artifact@v4
         with:
-          name: observables-analysis
+          name: ${{ inputs.script == 'observables.py' && 'observables' || 'spinpulse_p3' }}-analysis
           path: analysis/

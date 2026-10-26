@@ -17,8 +17,8 @@ import numpy as np
 import pandas as pd
 
 TASK_LABEL = {"stm": "memory capacity", "parity": "parity capacity"}
-LEVELS = ["ideal", "2q0.5", "2q1", "2q2", "2q2-ro1"]  # observables.NOISE order
-PLOT_LEVELS = ("ideal", "2q1", "2q2")
+LEVELS = ["ideal", "2q0.5", "2q1", "2q2", "2q2-ro1", "sp-ideal", "sp-2q99", "sp-2q98"]  # observables.NOISE, spinpulse_p3.LEVELS
+PLOT_LEVELS = ("ideal", "2q1", "2q2", "sp-ideal", "sp-2q99", "sp-2q98")  # at most 3 present per run
 # fixed set -> colour (reference palette slots 1-4, light mode); colour follows the set in every panel
 PLOT_SETS = {
     "Z-w1": "#2a78d6",
