@@ -1,0 +1,85 @@
+name: fraud_p4
+
+# P4 (results/observables/fraud_p4.py): fraud AP of the observable sets under shot and gate noise, one job per seed,
+# then one job that merges the CSVs. The dataset is regenerated on the runner with the recipe of
+# data/sc3_c1000_x6/README.md (identical to the local copy, ~1 min), so no data is uploaded. Download with:
+#   gh run download <run-id> -n fraud_p4-analysis -D results/observables/p4
+
+on:
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "comma-separated seeds"
+        default: "42,43,44,45,46,47,48,49,50,51"
+      levels:
+        description: "comma-separated noise levels (observables.NOISE)"
+        default: "ideal,2q1,2q2"
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      seeds: ${{ steps.matrix.outputs.seeds }}
+    steps:
+      - id: matrix
+        run: echo "seeds=[${{ inputs.seeds }}]" >> "$GITHUB_OUTPUT"
+
+  sweep:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ${{ fromJSON(needs.setup.outputs.seeds) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .
+      - name: Generate data/sc3_c1000_x6
+        run: |
+          python - <<'EOF'
+          from qrc.datasets.create_dataset import run_simulation
+          from qrc.datasets.split_dataset import main as split_and_save
+          customers, terminals, tx = run_simulation(
+              n_customers=1000, n_terminals=10000, nb_days=365, start_date="2025-01-01", r=5,
+              n_compromised_customers=6, output_dir="data/sc3_c1000_x6/raw",
+          )
+          split_and_save(tx, validation_start="2025-09-13", test_start="2025-11-06", output_dir="data/sc3_c1000_x6")
+          EOF
+      - name: Validate
+        run: python results/observables/fraud_p4.py --check
+      - name: Run
+        run: python results/observables/fraud_p4.py --seed ${{ matrix.seed }} --levels "${{ inputs.levels }}" --out runs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4-seed${{ matrix.seed }}
+          path: runs/
+
+  analyze:
+    needs: sweep
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: p4-seed*
+          merge-multiple: true
+          path: runs/
+      - run: python results/observables/analyze_p4.py --runs runs --out analysis
+      - run: cp -r runs analysis/runs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fraud_p4-analysis
+          path: analysis/
