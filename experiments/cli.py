@@ -691,6 +691,7 @@ def append_summary(summary_path, row):
         writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, restval="")
         if write_header:
             writer.writeheader()
+        writer.writerow(row)
 
 
 def save_run(args, data, metrics, scores, extra, reservoir_info=None):
