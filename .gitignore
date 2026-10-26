@@ -230,7 +230,7 @@ __marimo__/
 /results/*
 !/results/arma/
 /results/arma/summary.csv
-/results/arma/jobs.txt
+!/results/arma/jobs.txt
 
 !/results/armb/
 /results/armb/**/scores.npz

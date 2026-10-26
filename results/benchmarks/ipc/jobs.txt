@@ -53,7 +53,7 @@ for hamiltonian in random native-exchange; do
     done
 done
 
-3. Window
+# 3. Window
 
 mkdir -p results/benchmarks/ipc/window
 
