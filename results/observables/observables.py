@@ -278,7 +278,8 @@ def ridge_capacity(X_train, Y_train, X_test, Y_test):
     """Per-target capacity corr(y_hat, y)^2, alpha chosen per target on the last 20 % of the training set."""
     def fit(X, Y):
         mu, sd = X.mean(0), X.std(0)
-        sd[sd == 0] = 1
+        # constant columns (e.g. odd-weight strings on bit inputs, exact) would standardize rounding noise to O(1)
+        sd[sd < 1e-9] = np.inf
         U_, S, Vt = np.linalg.svd((X - mu) / sd, full_matrices=False)
         UtY = U_.T @ (Y - Y.mean(0))
         return [(mu, sd, Vt.T @ ((S / (S ** 2 + a))[:, None] * UtY), Y.mean(0)) for a in ALPHAS]
