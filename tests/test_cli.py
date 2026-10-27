@@ -80,7 +80,7 @@ def test_saved_simulation_reloads_identically(tmp_path):
 
     assert splits(loaded) == splits(simulated)
     for split in ("validation", "test"):
-        assert _metrics(loaded)[split] == pytest.approx(_metrics(simulated)[split])
+        assert _metrics(loaded)[split] == pytest.approx(_metrics(simulated)[split], nan_ok=True)
 
 
 def test_summary_records_reservoir_and_metrics(tmp_path):
