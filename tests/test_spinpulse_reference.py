@@ -126,11 +126,11 @@ def test_noisy_backend_matches_spinpulse_reference(noise_type, dd):
     expected = spinpulse_reference(backend, WINDOWS, config)
     np.testing.assert_allclose(features, expected, atol=1e-10)
 
-
-def test_reset_matches_exact_density_matrix():
+@pytest.mark.parametrize("reset_method", ["exact", "sampled"])
+def test_reset_matches_exact_density_matrix(reset_method):
     observables = PauliList(["IZ", "ZI", "ZZ"])
     backend = SpinPulseBackend(
-        SpinPulseConfig(noise_type="none", noise_samples=4000, seed=3),
+        SpinPulseConfig(noise_type="none", noise_samples=4000, seed=3, reset_method=reset_method),
         reset_inputs=True,
     )
     features = backend.run_batch(WINDOWS, AngleEncoding(1), TinyReservoir(), observables)
@@ -152,7 +152,6 @@ def test_reset_matches_exact_density_matrix():
     # The backend reports its own statistical error; allow 5 of those.
     tolerance = 5 * backend.last_stderr + 1e-9
     assert np.all(np.abs(features - exact) <= tolerance)
-
 
 
 
@@ -179,3 +178,27 @@ def test_coupling_noise_and_only_idle_match_spinpulse_reference(settings):
 
     expected = spinpulse_reference(backend, WINDOWS, config)
     np.testing.assert_allclose(features, expected, atol=1e-10)
+
+
+
+@pytest.mark.parametrize("noise_type", ["pink", "quasistatic"])
+def test_exact_reset_matches_sampled_reset_with_noise(noise_type):
+    """With noise, the exact (density-matrix) reset and the sampled one see the same noise
+    traces (same seed), so they differ only by the sampling of the reset outcomes."""
+    observables = PauliList(["IZ", "ZI", "ZZ", "XI"])
+    # strong noise (T2S=30), so it clearly matters on this tiny reservoir
+    settings = dict(noise_type=noise_type, T2S=30.0, noise_samples=200, seed=5)
+    exact = SpinPulseBackend(SpinPulseConfig(reset_method="exact", **settings), reset_inputs=True)
+    sampled = SpinPulseBackend(SpinPulseConfig(reset_method="sampled", **settings), reset_inputs=True)
+    a = exact.run_batch(WINDOWS, AngleEncoding(1), TinyReservoir(), observables)
+    b = sampled.run_batch(WINDOWS, AngleEncoding(1), TinyReservoir(), observables)
+
+    # Guard: the noise must matter, or this would only repeat the noise-free reset test.
+    noiseless = SpinPulseBackend(
+        SpinPulseConfig(noise_type="none", reset_method="exact"), reset_inputs=True
+    ).run_batch(WINDOWS, AngleEncoding(1), TinyReservoir(), observables)
+    assert not np.allclose(a, noiseless, atol=1e-2)
+
+    # The sampled run carries the reset-sampling error on top of the shared noise average.
+    tolerance = 5 * sampled.last_stderr + 1e-9
+    assert np.all(np.abs(a - b) <= tolerance)

@@ -298,11 +298,11 @@ def make_encoder(name, n_input_qubits, args):
 
 
 def spinpulse_config(args):
-    """SpinPulse hardware and noise settings from the qrc --noise/--t2/... options."""
-    return SpinPulseConfig(
+    """
+    SpinPulse hardware and noise settings from the qrc --hardware/--noise/--t2/... options.
+    """
+    common = dict(
         noise_type=args.noise,
-        T2S=args.t2,
-        TJS=args.tj,
         only_idle=args.only_idle,
         dynamical_decoupling=args.dd,
         pulse_shape=args.pulse_shape,
@@ -310,7 +310,14 @@ def spinpulse_config(args):
         precision=args.precision,
         seed=args.seed,
     )
-
+    if args.hardware == "realistic":
+        return SpinPulseConfig.realistic(
+            step_ns=args.time_step_ns,
+            t2_us=args.t2_us,
+            tj_us=args.tj_us or None,  # 0 turns the coupling noise off
+            **common,
+        )
+    return SpinPulseConfig(T2S=args.t2, TJS=args.tj, **common)
 
 def baseline_features(data):
     """Raw windows, flattened ``(n, L, F) → (n, L·F)``: what the readout sees without a reservoir."""
@@ -826,6 +833,14 @@ def build_parser():
         "spinpulse backend (only with --backend spinpulse)"
     )
     spin.add_argument(
+        "--hardware",
+        choices=("generic", "realistic"),
+        default="generic",
+        help="generic: the backend's default fields, times in arbitrary SpinPulse steps "
+        "(--t2, --tj); realistic: the spin-qubit chip of SpinPulse's ParametrizingfromQPUSpecs "
+        "example (1 us X/Y gates), times in us (--t2-us, --tj-us)",
+    )
+    spin.add_argument(
         "--noise",
         choices=NOISE_TYPES,
         default="pink",
@@ -844,6 +859,25 @@ def build_parser():
         default=None,
         help="dephasing time of the exchange coupling; off by default",
     )
+    spin.add_argument(
+        "--time-step-ns",
+        type=float,
+        default=10.0,
+        help="realistic hardware: simulation time step in ns (5-10 is accurate)",
+    )
+    spin.add_argument(
+        "--t2-us",
+        type=float,
+        default=10.0,
+        help="realistic hardware: qubit dephasing time T2* in us (today's devices: 10)",
+    )
+    spin.add_argument(
+        "--tj-us",
+        type=float,
+        default=5.0,
+        help="realistic hardware: coupling dephasing time TJ* in us (today's devices: 5; 0 = off)",
+    )
+
     spin.add_argument(
         "--only-idle",
         action="store_true",
