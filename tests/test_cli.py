@@ -80,7 +80,7 @@ def test_saved_simulation_reloads_identically(tmp_path):
 
     assert splits(loaded) == splits(simulated)
     for split in ("validation", "test"):
-        assert _metrics(loaded)[split] == pytest.approx(_metrics(simulated)[split])
+        assert _metrics(loaded)[split] == pytest.approx(_metrics(simulated)[split], nan_ok=True)
 
 
 def test_summary_records_reservoir_and_metrics(tmp_path):
@@ -118,6 +118,60 @@ def test_summary_records_reservoir_and_metrics(tmp_path):
     for split in ("validation", "test"):
         for metric in cli.METRIC_NAMES:
             assert row[f"{split}_{metric}"] != ""
+
+
+def test_summary_appends_new_fields_to_existing_schema(tmp_path):
+    summary_path = tmp_path / "summary.csv"
+    summary_path.write_text("run,command\nold-run,baseline\n")
+
+    cli.append_summary(
+        summary_path,
+        {
+            "run": "new-run",
+            "command": "classical",
+            "random_map_seed": 47,
+            "rff_gamma": 1.0,
+        },
+    )
+
+    with summary_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    assert "random_map_seed" in reader.fieldnames
+    assert "rff_gamma" in reader.fieldnames
+    assert rows[0]["run"] == "old-run"
+    assert rows[0]["random_map_seed"] == ""
+    assert rows[1]["run"] == "new-run"
+    assert rows[1]["random_map_seed"] == "47"
+    assert rows[1]["rff_gamma"] == "1.0"
+
+
+def test_classical_rff_run_saves_metadata_to_summary(tmp_path):
+    run_dir = main(
+        [
+            "classical",
+            "--size",
+            "small",
+            "--random-map-method",
+            "rff",
+            "--random-map-width",
+            "5",
+            "--seed",
+            "46",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    with (tmp_path / "summary.csv").open(newline="") as f:
+        (row,) = csv.DictReader(f)
+
+    assert row["run"] == run_dir.name
+    assert row["classical_model"] == "rff"
+    assert row["random_map_width"] == "5"
+    assert row["random_map_seed"] == "46"
+    assert row["rff_gamma"] == "1.0"
 
 
 def test_qrc_cli_selects_dense_encoding_when_qubits_are_fewer_than_features(
@@ -305,6 +359,66 @@ def test_cli_runs_on_raw_amount_windows(tmp_path):
         (row,) = csv.DictReader(f)
     assert row["run"] == run_dir.name
     assert (row["feature_set"], row["n_features"]) == ("1", "1")
+
+
+def test_classical_tanh_parser_and_random_map_features():
+    args = cli.build_parser().parse_args(
+        [
+            "classical",
+            "--random-map-width",
+            "5",
+            "--random-map-scale",
+            "0.75",
+            "--seed",
+            "44",
+        ]
+    )
+    data = {
+        f"X_{split}": np.arange(12, dtype=float).reshape(4, 1, 3)
+        for split in cli.SPLITS
+    }
+
+    features, info = cli.classical_random_map_features(data, args)
+
+    assert all(features[split].shape == (4, 5) for split in cli.SPLITS)
+    assert info == {
+        "classical_model": "tanh",
+        "random_map_width": 5,
+        "random_map_scale": 0.75,
+        "random_map_seed": 44,
+    }
+    repeated, _ = cli.classical_random_map_features(data, args)
+    assert np.array_equal(features["train"], repeated["train"])
+
+
+def test_classical_random_map_method_is_selectable():
+    args = cli.build_parser().parse_args(
+        [
+            "classical",
+            "--random-map-method",
+            "rff",
+            "--random-map-width",
+            "4",
+            "--seed",
+            "7",
+        ]
+    )
+    data = {
+        f"X_{split}": np.arange(12, dtype=float).reshape(4, 1, 3)
+        for split in cli.SPLITS
+    }
+
+    features, info = cli.classical_random_map_features(data, args)
+
+    assert args.random_map_method == "rff"
+    assert all(features[split].shape == (4, 4) for split in cli.SPLITS)
+    assert info == {
+        "classical_model": "rff",
+        "random_map_width": 4,
+        "random_map_scale": 1.0,
+        "random_map_seed": 7,
+        "rff_gamma": 1.0,
+    }
 
 
 def test_evaluation_cli_arguments_are_exposed():

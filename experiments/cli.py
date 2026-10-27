@@ -14,6 +14,7 @@ Data sources (``--data``):
 Commands:
     prepare   data preparation only; prints split shapes and fraud counts.
     baseline  logistic regression fitted on the raw (flattened) feature windows instead of the reservoir outputs.
+    classical fixed random feature map (tanh or RFF) plus logistic readout.
     lstm      recurrent neural-network baseline fitted on the feature windows.
     esn       echo state network: a fixed random classical reservoir + the same logistic readout as qrc.
     qrc       run the quantum reservoir, then fit the logistic readout.
@@ -25,6 +26,7 @@ validation and test metrics are reported. Each run is saved to
 Examples:
     python -m experiments.cli prepare --size small --save-data data/sim_small
     python -m experiments.cli baseline --size medium
+    python -m experiments.cli classical --random-map-method rff --feature-set 20 --window-length 1
     python -m experiments.cli lstm --size medium
     python -m experiments.cli esn --size medium --n-units 50 --spectral-radius 0.9
     python -m experiments.cli qrc --size medium --backend estimator-exact
@@ -38,7 +40,9 @@ To run many configurations on the same prepared data, see ``experiments/sweep.py
 import argparse
 import csv
 import json
+import os
 import subprocess
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -57,7 +61,7 @@ from qrc.backends.spinpulse import (
     SpinPulseConfig,
 )
 from qrc.datasets import load_split_files, split_dataset
-from qrc.datasets.create_dataset import add_frauds, generate_dataset
+from qrc.datasets.create_dataset import add_frauds, generate_dataset, scaled_simulation
 from qrc.datasets.split_dataset import main as split_and_save_dataset
 from qrc.decision import card_precision_top_k
 from qrc.encodings import AngleEncoding, ReuploadingEncoding, DenseAngleEncoding
@@ -77,8 +81,13 @@ from qrc.protocol import QRCProtocol
 from qrc.readout import ClassicalReadout
 from qrc.reservoirs import HamiltonianReservoir, RandomCircuitReservoir
 from qrc.sequences import SPLITS, window_by_customer_id
+
 from qrc.baselines.esn import EchoStateNetwork
 from qrc.baselines.lstm import run_lstm_baseline
+from experiments.classical_random_maps import (
+    SUPPORTED_RANDOM_MAPS,
+    make_random_map,
+)
 
 logger = get_logger(__name__)
 
@@ -109,17 +118,29 @@ _SET_15 = _SET_10 + [
     "CUSTOMER_TIME_GAP_SECONDS",
     "TX_DURING_WEEKEND",
 ]
-FEATURE_SETS = {1: _SET_1, 7: _SET_7, 10: _SET_10, 15: _SET_15}
+_SET_TX_AMOUNT_ENGINEERED = [
+    "CUSTOMER_AMOUNT_DEVIATION_30D",
+    "CUSTOMER_AMOUNT_RATIO_90D",
+    "CUSTOMER_AMOUNT_SHIFT_7D_30D",
+    "CUSTOMER_ACTIVITY_AMOUNT_30D",
+    "TX_AMOUNT_LOG",
+]
+FEATURE_SETS = {
+    1: _SET_1,
+    7: _SET_7,
+    10: _SET_10,
+    15: _SET_15,
+    20: _SET_TX_AMOUNT_ENGINEERED,
+}
 FEATURE_WINDOWS = (1, 7, 30, 90, 180)
 # TRAIN_RATIO, VALIDATION_RATIO = 0.70, 0.15
 
-# ~2 transactions per customer per day, so medium is ~35k transactions over a year.
-SIZES = {
-    "small": dict(n_customers=10, n_terminals=100),
-    "medium": dict(n_customers=50, n_terminals=500),
-    "large": dict(n_customers=100, n_terminals=1000),
-}
-SIMULATION = dict(nb_days=365, start_date="2025-01-01", r=5)
+# Number of customers, scaled down from the shared dataset (large, the same data with --data-seed 0)
+# keeping its fraud rate (~0.9%) and scenario mix (qrc.datasets.create_dataset.scaled_simulation).
+# ~700 transactions per customer per year: small ~14k transactions / ~130 frauds (smoke and
+# end-to-end tests), medium ~170k / ~1.6k (the smallest with meaningful per-category metrics).
+SIZES = {"small": 25, "medium": 250, "large": 5000}
+SIMULATION = dict(nb_days=365, start_date="2025-01-01")
 
 HAMILTONIAN_BUILDERS = {
     "tfim": tfim,
@@ -139,7 +160,7 @@ METRIC_NAMES = (
     "false_positive_rate",
     "matthews_corr_coef",
     "balanced_accuracy",
-    "card_precision_top_k"
+    "card_precision_top_k",
 )
 # per fraud category (qrc.evaluation); only when the data carries TX_FRAUD_SCENARIO
 CATEGORY_METRIC_NAMES = tuple(f"average_precision_{c}" for c in CATEGORIES)
@@ -147,9 +168,23 @@ CATEGORY_METRIC_NAMES = tuple(f"average_precision_{c}" for c in CATEGORIES)
 EVAL_SPLITS = ("validation", "test")
 SUMMARY_FIELDS = (
     # run and data
-    "run", "commit", "command", "data", "size", "data_seed", "data_dir", "start_date", "end_date",
-    "feature_set", "n_features", "window_length",
-    *(f"{split}_{k}" for split in SPLITS for k in ("samples", "frauds", *(f"frauds_{c}" for c in CATEGORIES))),
+    "run",
+    "commit",
+    "command",
+    "data",
+    "size",
+    "data_seed",
+    "data_dir",
+    "start_date",
+    "end_date",
+    "feature_set",
+    "n_features",
+    "window_length",
+    *(
+        f"{split}_{k}"
+        for split in SPLITS
+        for k in ("samples", "frauds", *(f"frauds_{c}" for c in CATEGORIES))
+    ),
     # reservoir (qrc only)
     "backend",
     "backend_precision",
@@ -170,17 +205,37 @@ SUMMARY_FIELDS = (
     "topology",
     "evolution_time",
     "trotter_steps",
+    # classical tanh random map
+    "classical_model",
+    "random_map_width",
+    "random_map_scale",
+    "random_map_seed",
+    "rff_gamma",
+    "classical_seconds",
     # lstm only
     "training_seconds",
     # esn only (also uses seed and reservoir_seconds)
-    "n_units", "spectral_radius", "leak_rate", "input_scaling", "bias_scaling", "density",
+    "n_units",
+    "spectral_radius",
+    "leak_rate",
+    "input_scaling",
+    "bias_scaling",
+    "density",
     # readout and metrics
-    "alpha", "threshold", "min_recall", "top_k",
-    *(f"{split}_{m}" for split in EVAL_SPLITS for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES)),
+    "alpha",
+    "threshold",
+    "min_recall",
+    "top_k",
+    *(
+        f"{split}_{m}"
+        for split in EVAL_SPLITS
+        for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES)
+    ),
 )
 
 
 # --------------------------------------------------------------------------- data
+
 
 def load_transactions(args):
     """Return the raw ``(train, validation, test)`` transactions from the chosen source."""
@@ -190,11 +245,11 @@ def load_transactions(args):
         splits = load_split_files(data_dir, args.start_date, args.end_date)
         return tuple(splits[split] for split in SPLITS)
 
-    simulation = dict(
-        SIZES[args.size], **SIMULATION, default_random_state=args.data_seed
+    simulation, frauds = scaled_simulation(SIZES[args.size])
+    customer_profiles, terminal_profiles, transactions = generate_dataset(
+        **simulation, **SIMULATION, default_random_state=args.data_seed
     )
-    customer_profiles, terminal_profiles, transactions = generate_dataset(**simulation)
-    transactions = add_frauds(customer_profiles, terminal_profiles, transactions)
+    transactions = add_frauds(customer_profiles, terminal_profiles, transactions, **frauds)
     if args.save_data:
         # Same layout as the shared dataset, so it can be reloaded with --data load
         return split_and_save_dataset(transactions, output_dir=args.save_data)
@@ -214,8 +269,11 @@ def prepare_data(args):
     full_data = pd.concat([train, validation, test], ignore_index=True)
     # kept aside for evaluation only, looked up by transaction since feature engineering reorders rows
     meta = (
-        full_data.set_index("TRANSACTION_ID")[["TX_FRAUD", "TX_FRAUD_SCENARIO", "TX_AMOUNT"]]
-        if "TX_FRAUD_SCENARIO" in full_data else None
+        full_data.set_index("TRANSACTION_ID")[
+            ["TX_FRAUD", "TX_FRAUD_SCENARIO", "TX_AMOUNT"]
+        ]
+        if "TX_FRAUD_SCENARIO" in full_data
+        else None
     )
     full_data = full_data.drop(
         columns=["TX_FRAUD_SCENARIO"], errors="ignore"
@@ -242,9 +300,13 @@ def prepare_data(args):
     if meta is not None:
         for split in SPLITS:
             rows = meta.loc[data[f"ids_{split}"]]
-            category = categorize(rows["TX_FRAUD"], rows["TX_FRAUD_SCENARIO"], rows["TX_AMOUNT"])
+            category = categorize(
+                rows["TX_FRAUD"], rows["TX_FRAUD_SCENARIO"], rows["TX_AMOUNT"]
+            )
             if not np.array_equal(category != "legit", data[f"y_{split}"] == 1):
-                raise ValueError(f"{split}: fraud categories do not line up with the labels")
+                raise ValueError(
+                    f"{split}: fraud categories do not line up with the labels"
+                )
             data[f"category_{split}"] = category
             for c in CATEGORIES:
                 data["summary"][split][f"frauds_{c}"] = int((category == c).sum())
@@ -258,6 +320,7 @@ def print_data_summary(data):
 
 
 # --------------------------------------------------------------------------- models
+
 
 def make_backend(name, precision, seed, reset_inputs=False, spinpulse=None):
     if name == "estimator-exact":
@@ -274,7 +337,8 @@ def make_backend(name, precision, seed, reset_inputs=False, spinpulse=None):
 
 def resolve_encoding(name, n_input_qubits, n_features, encoding_layers):
     """The encoding ``auto`` stands for: re-uploading with several layers, else dense
-    angle encoding when there are fewer input qubits than features, else angle encoding."""
+    angle encoding when there are fewer input qubits than features, else angle encoding.
+    """
     if name != "auto":
         return name
     if encoding_layers > 1:
@@ -325,6 +389,34 @@ def baseline_features(data):
         split: data[f"X_{split}"].reshape(len(data[f"X_{split}"]), -1)
         for split in SPLITS
     }
+
+
+def classical_random_map_features(data, args):
+    """Apply a fixed seeded classical random feature map to each split."""
+    flattened = baseline_features(data)
+    input_width = flattened["train"].shape[1]
+
+    map_width = input_width if args.random_map_width is None else args.random_map_width
+
+    method = args.random_map_method
+
+    if method not in SUPPORTED_RANDOM_MAPS:
+        raise ValueError(
+            f"Unknown random map {method!r}. " f"Choose from {SUPPORTED_RANDOM_MAPS}."
+        )
+
+    random_map = make_random_map(
+        method,
+        input_width=input_width,
+        map_width=map_width,
+        scale=args.random_map_scale,
+        seed=args.seed,
+    )
+    random_map.fit(flattened["train"])
+
+    mapped = {split: random_map.transform(X) for split, X in flattened.items()}
+
+    return mapped, random_map.get_metadata()
 
 
 def build_protocol(args):
@@ -397,7 +489,9 @@ def qrc_features(data, args):
     for split in SPLITS:
         print(f"running {args.backend} on {split} ...", flush=True)
         features[split] = protocol.run(data[f"X_{split}"])
-        stderr = getattr(protocol.backend, "last_stderr", None)  # only SpinPulse sets it
+        stderr = getattr(
+            protocol.backend, "last_stderr", None
+        )  # only SpinPulse sets it
         if stderr is not None:
             print(
                 f"  noise-sampling std. error per feature: "
@@ -439,6 +533,7 @@ def fit_and_evaluate(features, data, alpha, min_recall):
         scores[split] = split_scores
     return metrics, scores
 
+
 def add_operational_metrics(metrics, scores, data, top_k):
     """Add daily Card Precision@K to validation and test metrics."""
     for split in EVAL_SPLITS:
@@ -464,7 +559,9 @@ def add_derived_metrics(metrics, scores, data, top_k):
                 )
             )
 
+
 # --------------------------------------------------------------------------- results
+
 
 def data_source(args):
     if args.data == "load":
@@ -478,7 +575,7 @@ def data_source(args):
         "data": "simulate",
         "size": args.size,
         "data_seed": args.data_seed,
-        **SIZES[args.size],
+        **{k: v for params in scaled_simulation(SIZES[args.size]) for k, v in params.items()},
         **SIMULATION,
     }
 
@@ -525,13 +622,23 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
         "feature_set": args.feature_set,
         "n_features": len(FEATURE_SETS[args.feature_set]),
         "window_length": args.window_length,
-        **{f"{split}_{k}": v for split in SPLITS for k, v in data["summary"][split].items()},
+        **{
+            f"{split}_{k}": v
+            for split in SPLITS
+            for k, v in data["summary"][split].items()
+        },
         "alpha": getattr(args, "alpha", ""),  # lstm has no logistic readout
-        "threshold": metrics["validation"]["threshold_used"],  # threshold is frozen and reused on test
+        "threshold": metrics["validation"][
+            "threshold_used"
+        ],  # threshold is frozen and reused on test
         "min_recall": getattr(args, "min_recall", ""),
         "top_k": getattr(args, "top_k", ""),
-        **{f"{split}_{m}": metrics[split][m] for split in EVAL_SPLITS
-           for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES) if m in metrics[split]},
+        **{
+            f"{split}_{m}": metrics[split][m]
+            for split in EVAL_SPLITS
+            for m in (*METRIC_NAMES, *CATEGORY_METRIC_NAMES)
+            if m in metrics[split]
+        },
         **extra,
     }
     if args.command == "qrc":
@@ -554,6 +661,8 @@ def summary_row(args, data, metrics, reservoir_info, extra, run_name):
             **reservoir_info,
         )
     elif args.command == "lstm":
+        row.update(seed=args.seed)
+    elif args.command == "classical":
         row.update(seed=args.seed)
     elif args.command == "esn":
         row.update(
@@ -610,10 +719,16 @@ def save_run(args, data, metrics, scores, extra, reservoir_info=None):
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2))
     (run_dir / "metrics.json").write_text(json.dumps({**metrics, **extra}, indent=2))
-    np.savez(run_dir / "scores.npz",
-             **{f"{key}_{split}": data[f"{key}_{split}"] for split in scores
-                for key in ("y", "ids", "category") if f"{key}_{split}" in data},
-             **{f"scores_{split}": s for split, s in scores.items()})
+    np.savez(
+        run_dir / "scores.npz",
+        **{
+            f"{key}_{split}": data[f"{key}_{split}"]
+            for split in scores
+            for key in ("y", "ids", "category")
+            if f"{key}_{split}" in data
+        },
+        **{f"scores_{split}": s for split, s in scores.items()},
+    )
 
     append_summary(output_dir / "summary.csv", row)
     return run_dir
@@ -640,6 +755,7 @@ def print_metrics(metrics):
 
 
 # --------------------------------------------------------------------------- CLI
+
 
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
@@ -720,9 +836,37 @@ def build_parser():
         parents=[common, run, readout, evaluation],
         help="logistic regression on the raw (flattened) feature windows",
     )
+    classical_parser = commands.add_parser(
+        "classical",
+        parents=[common, run, readout, evaluation],
+        help="logistic readout on a fixed classical random feature map",
+    )
+    classical_parser.add_argument(
+        "--random-map-method",
+        choices=SUPPORTED_RANDOM_MAPS,
+        default="tanh",
+        help="random feature map type",
+    )
+    classical_parser.add_argument(
+        "--random-map-width",
+        type=int,
+        default=None,
+        help="number of random-map features (defaults to flattened input width)",
+    )
+    classical_parser.add_argument(
+        "--random-map-scale",
+        type=float,
+        default=1.0,
+        help="scale of the random-map weights",
+    )
+    classical_parser.add_argument(
+        "--seed", type=int, default=42, help="random-map seed"
+    )
 
     lstm_parser = commands.add_parser(
-        "lstm", parents=[common, run, evaluation], help="LSTM classifier on transaction windows"
+        "lstm",
+        parents=[common, run, evaluation],
+        help="LSTM classifier on transaction windows",
     )
     lstm_parser.add_argument("--hidden-size", type=int, default=32)
     lstm_parser.add_argument("--epochs", type=int, default=50)
@@ -738,20 +882,35 @@ def build_parser():
     )
     esn_parser.add_argument("--n-units", type=int, default=50, help="reservoir neurons")
     esn_parser.add_argument(
-        "--spectral-radius", type=float, default=0.9, help="largest |eigenvalue| of the recurrent weights"
+        "--spectral-radius",
+        type=float,
+        default=0.9,
+        help="largest |eigenvalue| of the recurrent weights",
     )
     esn_parser.add_argument(
-        "--leak-rate", type=float, default=1.0, help="state update rate in (0, 1]; smaller = slower, longer memory"
+        "--leak-rate",
+        type=float,
+        default=1.0,
+        help="state update rate in (0, 1]; smaller = slower, longer memory",
     )
-    esn_parser.add_argument("--input-scaling", type=float, default=1.0, help="range of the input weights")
-    esn_parser.add_argument("--bias-scaling", type=float, default=0.2, help="range of the neuron biases")
-    esn_parser.add_argument("--density", type=float, default=1.0, help="fraction of non-zero recurrent weights")
+    esn_parser.add_argument(
+        "--input-scaling", type=float, default=1.0, help="range of the input weights"
+    )
+    esn_parser.add_argument(
+        "--bias-scaling", type=float, default=0.2, help="range of the neuron biases"
+    )
+    esn_parser.add_argument(
+        "--density",
+        type=float,
+        default=1.0,
+        help="fraction of non-zero recurrent weights",
+    )
     esn_parser.add_argument("--seed", type=int, default=42, help="reservoir seed")
 
     qrc_parser = commands.add_parser(
         "qrc",
         parents=[common, run, readout, evaluation],
-        help="quantum reservoir + logistic readout"
+        help="quantum reservoir + logistic readout",
     )
     qrc_parser.add_argument(
         "--backend",
@@ -921,6 +1080,17 @@ def run(args, data):
     if args.command == "baseline":
         features = baseline_features(data)
         metrics, scores = fit_and_evaluate(features, data, args.alpha, args.min_recall)
+    elif args.command == "classical":
+        start = time.perf_counter()
+        features, classical_info = classical_random_map_features(data, args)
+        extra.update(classical_info)
+        metrics, scores = fit_and_evaluate(
+            features,
+            data,
+            args.alpha,
+            args.min_recall,
+        )
+        extra["classical_seconds"] = time.perf_counter() - start
     elif args.command == "lstm":
         splits = {split: (data[f"X_{split}"], data[f"y_{split}"]) for split in SPLITS}
         result = run_lstm_baseline(
