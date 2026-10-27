@@ -184,9 +184,33 @@ def generate_dataset(n_customers=5000, n_terminals=10000, nb_days=365, start_dat
     return (customer_profiles_table, terminal_profiles_table, transactions_df)
 
 #%%
-def add_frauds(customer_profiles_table, terminal_profiles_table, transactions_df, n_compromised_customers=3):
-    """Label the frauds of the three scenarios. `n_compromised_customers` is the number of customers
-    compromised each day in scenario 3 (3 in the Fraud Detection Handbook and the shared dataset)."""
+def scaled_simulation(n_customers):
+    """Simulation parameters for `n_customers` with the statistics of the Fraud Detection Handbook
+    dataset (5000 customers, the shared dataset): twice as many terminals, a terminal radius that keeps
+    ~80 terminals per customer and ~40 customers per terminal, and compromise rates proportional to
+    the population, so the fraud rate (~0.9%) and scenario mix stay the same at every size.
+
+    Returns:
+        tuple: keyword arguments for `generate_dataset` and for `add_frauds`.
+    """
+    scale = n_customers / 5000
+    simulation = dict(n_customers=n_customers, n_terminals=2 * n_customers, r=5 / np.sqrt(scale))
+    frauds = dict(n_compromised_terminals=2 * scale, n_compromised_customers=3 * scale)
+    return simulation, frauds
+
+
+def _n_compromised_on_day(rate, day):
+    """How many to compromise on `day` for an average of `rate` per day (possibly fractional),
+    spread evenly over the days; exactly `rate` every day when it is an integer."""
+    return int(np.floor(rate * (day + 1) + 1e-9) - np.floor(rate * day + 1e-9))
+
+
+def add_frauds(customer_profiles_table, terminal_profiles_table, transactions_df,
+               n_compromised_terminals=2, n_compromised_customers=3):
+    """Label the frauds of the three scenarios. `n_compromised_terminals` (scenario 2) and
+    `n_compromised_customers` (scenario 3) are the average numbers compromised per day (2 and 3 in the
+    Fraud Detection Handbook and the shared dataset); fractional rates spread them over the days,
+    e.g. 0.25 compromises one every fourth day."""
     # By default, all transactions are genuine
     transactions_df['TX_FRAUD'] = 0
     transactions_df['TX_FRAUD_SCENARIO'] = 0
@@ -199,7 +223,10 @@ def add_frauds(customer_profiles_table, terminal_profiles_table, transactions_df
 
     # Scenario 2
     for day in range(transactions_df.TX_TIME_DAYS.max()):
-        compromised_terminals = terminal_profiles_table.TERMINAL_ID.sample(n=2, random_state=day)
+        n_terminals = _n_compromised_on_day(n_compromised_terminals, day)
+        if n_terminals == 0:
+            continue
+        compromised_terminals = terminal_profiles_table.TERMINAL_ID.sample(n=n_terminals, random_state=day)
 
         compromised_transactions = transactions_df[(transactions_df.TX_TIME_DAYS >= day) &
                                                    (transactions_df.TX_TIME_DAYS < day + 28) &
@@ -213,7 +240,10 @@ def add_frauds(customer_profiles_table, terminal_profiles_table, transactions_df
 
     # Scenario 3
     for day in range(transactions_df.TX_TIME_DAYS.max()):
-        compromised_customers = customer_profiles_table.CUSTOMER_ID.sample(n=n_compromised_customers, random_state=day).values
+        n_customers = _n_compromised_on_day(n_compromised_customers, day)
+        if n_customers == 0:
+            continue
+        compromised_customers = customer_profiles_table.CUSTOMER_ID.sample(n=n_customers, random_state=day).values
 
         compromised_transactions = transactions_df[(transactions_df.TX_TIME_DAYS >= day) &
                                                    (transactions_df.TX_TIME_DAYS < day + 14) &

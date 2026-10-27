@@ -31,7 +31,7 @@ python -m experiments.cli qrc      --size small
 ```
 
 No dataset download is needed for this: by default the data is simulated on the fly.
-On a laptop, the `small` preset takes a few seconds for `baseline` and about 10–15 seconds for `qrc`.
+On a laptop, the `small` preset takes a couple of seconds for `baseline` and under 10 seconds for `qrc`.
 
 > `pip install -e .` installs the `qrc` package in editable mode, so changes you make under
 > `qrc/` take effect immediately without reinstalling.
@@ -132,13 +132,21 @@ python -m experiments.cli qrc --size medium --hamiltonian tfim --topology ring
 | Option                        | Default    | Meaning                                                                                                                                              |
 | ----------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--data simulate\|load`       | `simulate` | Simulate a dataset, or load the split `.pkl` files                                                                                                   |
-| `--size small\|medium\|large` | `medium`   | Simulation preset: 10 / 50 / 100 customers over 365 days                                                                                             |
+| `--size small\|medium\|large` | `medium`   | Simulation preset: 25 / 250 / 5000 customers over 365 days (~14k / ~170k / ~3.5M transactions), all with the shared dataset's ~0.9% frauds; `large` is the shared dataset |
 | `--data-seed`                 | `0`        | Simulation seed                                                                                                                                      |
 | `--save-data DIR`             | –          | Also write the simulated splits to `DIR` (reload with `--data load --data-dir DIR`)                                                                  |
 | `--data-dir DIR`              | `data/`    | Where `--data load` reads `transactions_{train,validation,test}.pkl`                                                                                 |
 | `--start-date`, `--end-date`  | –          | Restrict the loaded period (`YYYY-MM-DD`)                                                                                                            |
 | `--feature-set 1\|7\|10\|15`   | `7`        | `1`: the raw log amount only. `7`, `10`, `15`: selected by the feature analysis, each extends the previous ([list](docs/data_pipeline.md#4-feature-analysis-and-the-feature-sets)) |
 | `--window-length`             | `3`        | Number of transactions per customer window                                                                                                           |
+
+The presets scale the shared dataset (5000 customers) down while keeping its statistics: twice as many
+terminals as customers, the same number of terminals per customer and customers per terminal, and
+compromise rates proportional to the population, so the fraud rate and scenario mix are the same at
+every size. `small` (~130 frauds) is for smoke and end-to-end tests: its splits hold only a few
+compromised customers, so per-category metrics are noisy (validation `average_precision_customer` is
+often `NaN`). `medium` (~1.6k frauds) is the smallest size with meaningful per-category metrics. `large`
+with `--data-seed 0` regenerates the shared dataset (about 7 minutes); `--data load` is faster.
 
 **Readout, evaluation and output**, for `baseline`, `lstm`, `esn` and `qrc` (`--alpha` is not used by `lstm`):
 

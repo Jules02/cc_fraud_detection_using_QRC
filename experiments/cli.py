@@ -61,7 +61,7 @@ from qrc.backends.spinpulse import (
     SpinPulseConfig,
 )
 from qrc.datasets import load_split_files, split_dataset
-from qrc.datasets.create_dataset import add_frauds, generate_dataset
+from qrc.datasets.create_dataset import add_frauds, generate_dataset, scaled_simulation
 from qrc.datasets.split_dataset import main as split_and_save_dataset
 from qrc.decision import card_precision_top_k
 from qrc.encodings import AngleEncoding, ReuploadingEncoding, DenseAngleEncoding
@@ -135,13 +135,12 @@ FEATURE_SETS = {
 FEATURE_WINDOWS = (1, 7, 30, 90, 180)
 # TRAIN_RATIO, VALIDATION_RATIO = 0.70, 0.15
 
-# ~2 transactions per customer per day, so medium is ~35k transactions over a year.
-SIZES = {
-    "small": dict(n_customers=10, n_terminals=100),
-    "medium": dict(n_customers=50, n_terminals=500),
-    "large": dict(n_customers=100, n_terminals=1000),
-}
-SIMULATION = dict(nb_days=365, start_date="2025-01-01", r=5)
+# Number of customers, scaled down from the shared dataset (large, the same data with --data-seed 0)
+# keeping its fraud rate (~0.9%) and scenario mix (qrc.datasets.create_dataset.scaled_simulation).
+# ~700 transactions per customer per year: small ~14k transactions / ~130 frauds (smoke and
+# end-to-end tests), medium ~170k / ~1.6k (the smallest with meaningful per-category metrics).
+SIZES = {"small": 25, "medium": 250, "large": 5000}
+SIMULATION = dict(nb_days=365, start_date="2025-01-01")
 
 HAMILTONIAN_BUILDERS = {
     "tfim": tfim,
@@ -246,11 +245,11 @@ def load_transactions(args):
         splits = load_split_files(data_dir, args.start_date, args.end_date)
         return tuple(splits[split] for split in SPLITS)
 
-    simulation = dict(
-        SIZES[args.size], **SIMULATION, default_random_state=args.data_seed
+    simulation, frauds = scaled_simulation(SIZES[args.size])
+    customer_profiles, terminal_profiles, transactions = generate_dataset(
+        **simulation, **SIMULATION, default_random_state=args.data_seed
     )
-    customer_profiles, terminal_profiles, transactions = generate_dataset(**simulation)
-    transactions = add_frauds(customer_profiles, terminal_profiles, transactions)
+    transactions = add_frauds(customer_profiles, terminal_profiles, transactions, **frauds)
     if args.save_data:
         # Same layout as the shared dataset, so it can be reloaded with --data load
         return split_and_save_dataset(transactions, output_dir=args.save_data)
@@ -569,7 +568,7 @@ def data_source(args):
         "data": "simulate",
         "size": args.size,
         "data_seed": args.data_seed,
-        **SIZES[args.size],
+        **{k: v for params in scaled_simulation(SIZES[args.size]) for k, v in params.items()},
         **SIMULATION,
     }
 
