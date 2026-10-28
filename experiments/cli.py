@@ -322,11 +322,16 @@ def print_data_summary(data):
 # --------------------------------------------------------------------------- models
 
 
-def make_backend(name, precision, seed, reset_inputs=False, spinpulse=None):
+def make_backend(name, precision, seed, reset_inputs=False, spinpulse=None, simulator="aer"):
+    if simulator != "aer" and name != "gaussian":
+        raise ValueError(f"--simulator {simulator} only applies to --backend gaussian")
     if name == "estimator-exact":
         return EstimatorBackend(reset_inputs=reset_inputs)
     if name == "numpy":
         return NumpyBackend(reset_inputs=reset_inputs)
+    if name == "gaussian" and simulator == "numpy":
+        # same values as Aer's (exact + the same Gaussian draws), much faster on few qubits
+        return NumpyBackend(reset_inputs=reset_inputs, precision=precision, seed=seed)
     if name == "spinpulse":
         config = spinpulse or SpinPulseConfig(precision=precision, seed=seed)
         return SpinPulseBackend(config, reset_inputs=reset_inputs)
@@ -362,11 +367,11 @@ def make_encoder(name, n_input_qubits, args):
 
 
 def spinpulse_config(args):
-    """SpinPulse hardware and noise settings from the qrc --noise/--t2/... options."""
-    return SpinPulseConfig(
+    """
+    SpinPulse hardware and noise settings from the qrc --hardware/--noise/--t2/... options.
+    """
+    common = dict(
         noise_type=args.noise,
-        T2S=args.t2,
-        TJS=args.tj,
         only_idle=args.only_idle,
         dynamical_decoupling=args.dd,
         pulse_shape=args.pulse_shape,
@@ -374,7 +379,14 @@ def spinpulse_config(args):
         precision=args.precision,
         seed=args.seed,
     )
-
+    if args.hardware == "realistic":
+        return SpinPulseConfig.realistic(
+            step_ns=args.time_step_ns,
+            t2_us=args.t2_us,
+            tj_us=args.tj_us or None,  # 0 turns the coupling noise off
+            **common,
+        )
+    return SpinPulseConfig(T2S=args.t2, TJS=args.tj, **common)
 
 def baseline_features(data):
     """Raw windows, flattened ``(n, L, F) → (n, L·F)``: what the readout sees without a reservoir."""
@@ -455,6 +467,7 @@ def build_protocol(args):
         args.seed,
         args.reset_inputs,
         spinpulse_config(args) if args.backend == "spinpulse" else None,
+        args.simulator,
     )
     protocol = QRCProtocol(encoder, reservoir, observables, backend)
     reservoir_info = {
@@ -919,6 +932,13 @@ def build_parser():
         "shots ~ 1/precision**2; 0 = exact, spinpulse only)",
     )
     qrc_parser.add_argument(
+        "--simulator",
+        choices=("aer", "numpy"),
+        default="aer",
+        help="computes the exact values the gaussian backend adds noise to. 'numpy' gives "
+        "the same features as 'aer' (same noise draws), much faster up to ~8 qubits",
+    )
+    qrc_parser.add_argument(
         "--n-input-qubits",
         type=int,
         default=None,
@@ -985,6 +1005,14 @@ def build_parser():
         "spinpulse backend (only with --backend spinpulse)"
     )
     spin.add_argument(
+        "--hardware",
+        choices=("generic", "realistic"),
+        default="generic",
+        help="generic: the backend's default fields, times in arbitrary SpinPulse steps "
+        "(--t2, --tj); realistic: the spin-qubit chip of SpinPulse's ParametrizingfromQPUSpecs "
+        "example (1 us X/Y gates), times in us (--t2-us, --tj-us)",
+    )
+    spin.add_argument(
         "--noise",
         choices=NOISE_TYPES,
         default="pink",
@@ -1003,6 +1031,25 @@ def build_parser():
         default=None,
         help="dephasing time of the exchange coupling; off by default",
     )
+    spin.add_argument(
+        "--time-step-ns",
+        type=float,
+        default=10.0,
+        help="realistic hardware: simulation time step in ns (5-10 is accurate)",
+    )
+    spin.add_argument(
+        "--t2-us",
+        type=float,
+        default=10.0,
+        help="realistic hardware: qubit dephasing time T2* in us (today's devices: 10)",
+    )
+    spin.add_argument(
+        "--tj-us",
+        type=float,
+        default=5.0,
+        help="realistic hardware: coupling dephasing time TJ* in us (today's devices: 5; 0 = off)",
+    )
+
     spin.add_argument(
         "--only-idle",
         action="store_true",

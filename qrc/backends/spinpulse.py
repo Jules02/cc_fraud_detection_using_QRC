@@ -56,6 +56,9 @@ _FUSE_BLOCKS = PassManager([Collect2qBlocks(), ConsolidateBlocks(force_consolida
 NOISE_TYPES = ("none", "white", "pink", "quasistatic")
 PULSE_SHAPES = ("gaussian", "square")
 DD_MODES = ("none", "spin-echo", "full-drive")
+RESET_METHODS = ("auto", "exact", "sampled")
+EXACT_RESET_MAX_QUBITS = 6
+NOISE_CALL_STRIDE = 1_000_003
 
 _AXIS = {"rx": "x", "ry": "y", "rz": "z"}
 
@@ -72,6 +75,9 @@ class SpinPulseConfig:
         J_coupling: exchange coupling
         pulse_shape: gaussian or square control pulses
         dynamical_decoupling: none, spin-echo or full-drive on idle qubits.
+        ramp_duration: idle time steps before and after every rzz pulse
+        time_step_ns: physical length of one time step (None = arbitrary units);
+            set by SpinPulseConfig.realistic(), used to report times in us
 
     Noise (passed to spin_pulse.ExperimentalEnvironment):
         noise_type: none, white, pink or quasistatic
@@ -90,6 +96,10 @@ class SpinPulseConfig:
             - 0 for exact expectation values
             - the target standard error of each estimate | N = (1 / precision**2) shots are sampled per window
         seed: seeds the noise traces, the reset outcomes and the shot sampling
+        reset_method: how reset_inputs is simulated
+            - exact : density matrices, Tr_inputs(rho) (x) |0><0| (memory grows as 4^n per window)
+            - sampled : a sampled measurement per realization (quantum trajectories)
+            - auto (default) : exact up to EXACT_RESET_MAX_QUBITS qubits, sampled above
     """
 
     noise_type: str = "pink"
@@ -102,9 +112,52 @@ class SpinPulseConfig:
     J_coupling: float = 0.05
     pulse_shape: str = "gaussian"
     dynamical_decoupling: str = "none"
+    ramp_duration: int = 1  # idle time steps before and after every rzz pulse
+    time_step_ns : Optional[float] = None  # physical length of one time step. None = arbitrary units
     noise_samples: int = 20
     precision: float = 0.0
     seed: Optional[int] = None
+    reset_method : str = "auto" # input reset : exact (density matrices), sampled, auto
+    max_chunk_bytes : int = 256* 2**20
+
+    @classmethod
+    def realistic(cls, step_ns=10.0, t2_us=10.0, tj_us=5.0, **overrides):
+        """
+        Silicon spin-qubit chip of SpinPulse's example ``ParametrizingfromQPUSpecs``.
+
+        Gate times: X/Y 1 us, Z 0.1 us, RZZ(pi/2) 1 us (about 3 us with its X echoes).
+        Pink noise with T2* = 10 us and TJ* = 5 us, which SpinPulse calibrates to a
+        single-qubit fidelity above 0.9995 and a two-qubit fidelity of about 0.995.
+
+        Args:
+            step_ns: simulation time step in ns. The fields are rescaled so the gate times
+                stay the same; 10 ns reproduces the 1 ns fidelities within 6e-4 at about a
+                tenth of the cost (5 to 10 ns is safe, 20 ns distorts the 100 ns Z pulses).
+            t2_us, tj_us: qubit and coupling dephasing times in us; ``tj_us=None`` turns
+                the coupling noise off. Larger values mean a better chip.
+            overrides: any other field, e.g. ``noise_type`` or ``noise_samples``.
+        """
+        coeff_duration = 5  # SpinPulse's default: a Gaussian pulse lasts 5 widths
+
+        def width(gate_ns):  # Gaussian width, in time steps, of a gate lasting gate_ns
+            return gate_ns / step_ns / coeff_duration
+
+        settings = dict(
+            # field strengths that give an R(pi) X/Y pulse of 1 us, R(pi) Z of 0.1 us and RZZ(pi/2) of 1 us
+            B_field=np.pi / (np.sqrt(2 * np.pi) * width(1000)),
+            delta=np.pi / (np.sqrt(2 * np.pi) * width(100)),
+            J_coupling=np.pi / (2 * np.sqrt(2 * np.pi) * width(1000)),
+            ramp_duration=max(1, round(5 / step_ns)),  # 5 ns ramps
+            pulse_shape="gaussian",
+            noise_type="pink",
+            T2S=t2_us * 1000 / step_ns,
+            TJS=None if tj_us is None else tj_us * 1000 / step_ns,
+            # 1 ms pink-noise segment as in the example: keeps drifts slower than one window
+            segment_duration=2 * round(1e6 / step_ns / 2),
+            time_step_ns=step_ns,
+        )
+        settings.update(overrides)
+        return cls(**settings)   
 
     # safety check to reject bad values immediately
     def __post_init__(self):
@@ -112,14 +165,22 @@ class SpinPulseConfig:
             ("noise_type", self.noise_type, NOISE_TYPES),
             ("pulse_shape", self.pulse_shape, PULSE_SHAPES),
             ("dynamical_decoupling", self.dynamical_decoupling, DD_MODES),
+            ("reset_method", self.reset_method, RESET_METHODS),
         ):
             if value not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}, got {value!r}")
         if self.noise_samples < 1:
             raise ValueError(f"noise_samples must be at least 1, got {self.noise_samples}")
+        if self.max_chunk_bytes < 1:
+            raise ValueError(f"max_chunk_bytes must be positive, got {self.max_chunk_bytes}")
         if self.precision < 0:
             raise ValueError("precision must be non-negative")
 
+        if self.ramp_duration < 1:
+            raise ValueError(f"ramp_duration must be at least 1, got {self.ramp_duration}")
+        if self.time_step_ns is not None and self.time_step_ns <= 0:
+            raise ValueError(f"time_step_ns must be positive, got {self.time_step_ns}")
+    
     # check if HW noise is present
     @property
     def noisy(self) -> bool:
@@ -172,6 +233,7 @@ class SpinPulseBackend(Backend):
         self._timeline_key = None
         self._timeline = None
         self.last_stderr = None     # stores uncertainty estimates from different noise realizations
+        self._calls = 0 # each run_batch call draws its own noise
 
     def _hardware_specs(self, n_qubits: int) -> "HardwareSpecs":
         c = self.config
@@ -187,6 +249,7 @@ class SpinPulseBackend(Backend):
             J_coupling=c.J_coupling,
             rotation_shape=Shape(c.pulse_shape),
             dynamical_decoupling=dd,
+            ramp_duration = c.ramp_duration,
         )
         # replaace random compiler with seeded one so that the same reservoir always becomes saame pulses
         # HardwareSpecs compiles against a GenericBackendV2 with random gate errors and an
@@ -212,7 +275,7 @@ class SpinPulseBackend(Backend):
 
     # creates Spinpulse's noise generator, configured for one window
     # noise generator for one complete input window
-    def _environment(self, specs, window_duration: int):
+    def _environment(self, specs, window_duration: int, seed = None):
         """
         Noise environment whose traces cover exactly one window (rounded up to even).
 
@@ -228,6 +291,8 @@ class SpinPulseBackend(Backend):
         else:
             segment = c.segment_duration or duration
             segment += segment % 2  # pink noise needs an even segment
+            if c.noise_type == "quasistatic" and duration % segment:
+                segment = duration  # SpinPulse needs whole segments; a longer hold is constant over the window anyway
         # returns object that generates noise traces : one list of frequency offsets dω(t) per qubit
         return ExperimentalEnvironment(
             hardware_specs=specs,
@@ -237,7 +302,7 @@ class SpinPulseBackend(Backend):
             duration=duration,
             only_idle=c.only_idle,
             segment_duration=segment,
-            seed=c.seed,
+            seed=seed,
         )
 
     # fixed plan of a inwdow : encoding pulse pla, angle rules, compiled reservoir
@@ -313,35 +378,78 @@ class SpinPulseBackend(Backend):
         c = self.config
 
         window_duration = window_length * tl.step_duration
-        env = self._environment(tl.specs, window_duration)
-        rng = np.random.default_rng(c.seed)
-        n_realizations = c.noise_samples if (env is not None or self.reset_inputs) else 1
+        # Every call (e.g. the train, validation and test splits) draws its own noise, reset
+        # outcomes and shots; the first call uses the seed itself, so runs stay reproducible.
+        seed = None if c.seed is None else c.seed + NOISE_CALL_STRIDE * self._calls
+        self._calls += 1
+        env = self._environment(tl.specs, window_duration, seed)
+        rng = np.random.default_rng(seed)
+        # With input reset, small registers are propagated as density matrices, so the reset is
+        # exact; larger ones sample the reset outcome per realization (quantum trajectories).
+        exact_reset = self.reset_inputs and self._exact_reset(tl.n_qubits)
+        sampled_reset = self.reset_inputs and not exact_reset
+        # several realizations when there is noise to average or reset outcomes to sample
+        n_realizations = c.noise_samples if (env is not None or sampled_reset) else 1
         obs_matrices = [SparsePauliOp(p).to_matrix(sparse=True) for p in observables]
+        if exact_reset:
+            obs_matrices = [op.toarray() for op in obs_matrices]
 
         dim = 2**tl.n_qubits
+        # windows are processed in chunks whose states fit in max_chunk_bytes
+        per_window = 16 * dim * (dim if exact_reset else 1) * 3  # complex128 state + temporaries
+        chunk = max(1, c.max_chunk_bytes // per_window)
         total = np.zeros((len(observables), samples))
         total_sq = np.zeros_like(total)
         probabilities = np.zeros((dim, samples)) if c.precision > 0 else None
-        # multiple realizations when noise or input resets are enabled, otherwise one realization is enough
         for m in range(n_realizations):
             if env is not None and m > 0:
                 env.generate_time_traces()  # fresh, independent noise for this realization
-            state = np.zeros((dim, samples), dtype=complex)
-            state[0] = 1.0
-            for t in range(window_length):
-                t_enc = t * tl.step_duration
-                if self.reset_inputs and t > 0:
-                    state = _reset_qubits(state, range(tl.n_inputs), tl.n_qubits, rng)
-                state = self._apply_encoding(state, values[:, t], tl, env, t_enc)
-                state = self._reservoir_unitary(tl, env, t_enc + tl.enc_duration) @ state
+            # this realization's reservoir unitaries, shared by every window and chunk
+            reservoir_unitaries = [
+                self._reservoir_unitary(tl, env, t * tl.step_duration + tl.enc_duration)
+                for t in range(window_length)
+            ]
+            for start in range(0, samples, chunk):
+                part = slice(start, min(samples, start + chunk))
+                expectations, populations = self._propagate(
+                    values[part], tl, env, reservoir_unitaries, obs_matrices,
+                    exact_reset, sampled_reset, rng,
+                )
+                total[:, part] += expectations
+                total_sq[:, part] += expectations**2
+                if probabilities is not None:
+                    probabilities[:, part] += populations
 
-            expectations = np.stack(
-                [np.real(np.sum(state.conj() * (op @ state), axis=0)) for op in obs_matrices]
-            )
-            total += expectations
-            total_sq += expectations**2
-            if probabilities is not None:
-                probabilities += np.abs(state) ** 2
+        # window_duration = window_length * tl.step_duration
+        # env = self._environment(tl.specs, window_duration)
+        # rng = np.random.default_rng(c.seed)
+        # n_realizations = c.noise_samples if (env is not None or self.reset_inputs) else 1
+        # obs_matrices = [SparsePauliOp(p).to_matrix(sparse=True) for p in observables]
+
+        # dim = 2**tl.n_qubits
+        # total = np.zeros((len(observables), samples))
+        # total_sq = np.zeros_like(total)
+        # probabilities = np.zeros((dim, samples)) if c.precision > 0 else None
+        # # multiple realizations when noise or input resets are enabled, otherwise one realization is enough
+        # for m in range(n_realizations):
+        #     if env is not None and m > 0:
+        #         env.generate_time_traces()  # fresh, independent noise for this realization
+        #     state = np.zeros((dim, samples), dtype=complex)
+        #     state[0] = 1.0
+        #     for t in range(window_length):
+        #         t_enc = t * tl.step_duration
+        #         if self.reset_inputs and t > 0:
+        #             state = _reset_qubits(state, range(tl.n_inputs), tl.n_qubits, rng)
+        #         state = self._apply_encoding(state, values[:, t], tl, env, t_enc)
+        #         state = self._reservoir_unitary(tl, env, t_enc + tl.enc_duration) @ state
+
+        #     expectations = np.stack(
+        #         [np.real(np.sum(state.conj() * (op @ state), axis=0)) for op in obs_matrices]
+        #     )
+        #     total += expectations
+        #     total_sq += expectations**2
+        #     if probabilities is not None:
+        #         probabilities += np.abs(state) ** 2
 
         mean = total / n_realizations
         if n_realizations > 1:
@@ -356,6 +464,38 @@ class SpinPulseBackend(Backend):
         return _sample_diagonal_expectations(
             probabilities / n_realizations, observables, shots, rng
         )
+
+    def _propagate(self, values, tl: _Timeline, env, reservoir_unitaries, obs_matrices,
+                   exact_reset, sampled_reset, rng):
+        """One noise realization for a chunk of windows: (expectations (K, n), populations (2^n, n)).
+
+        ``values`` has shape (n, window_length, input_width); ``reservoir_unitaries`` holds the
+        realization's reservoir unitary of every timestep."""
+        samples = len(values)
+        dim = 2**tl.n_qubits
+        if exact_reset:
+            rho = np.zeros((samples, dim, dim), dtype=complex)
+            rho[:, 0, 0] = 1.0
+            for t, U in enumerate(reservoir_unitaries):
+                if t > 0:
+                    rho = _reset_inputs_exact(rho, tl.n_inputs)
+                for q, unitaries in self._encoding_unitaries(values[:, t], tl, env, t * tl.step_duration, samples):
+                    rho = _apply_single_qubit_dm(rho, unitaries, q, tl.n_qubits)
+                rho = U @ rho @ U.conj().T
+            expectations = np.stack([np.einsum("ij,nji->n", op, rho).real for op in obs_matrices])
+            return expectations, np.real(np.diagonal(rho, axis1=1, axis2=2)).T
+
+        state = np.zeros((dim, samples), dtype=complex)
+        state[0] = 1.0
+        for t, U in enumerate(reservoir_unitaries):
+            if sampled_reset and t > 0:
+                state = _reset_qubits(state, range(tl.n_inputs), tl.n_qubits, rng)
+            state = self._apply_encoding(state, values[:, t], tl, env, t * tl.step_duration)
+            state = U @ state
+        expectations = np.stack(
+            [np.real(np.sum(state.conj() * (op @ state), axis=0)) for op in obs_matrices]
+        )
+        return expectations, np.abs(state) ** 2
 
     def _reservoir_unitary(self, tl: _Timeline, env, t_start: int) -> np.ndarray:
         """
@@ -372,6 +512,35 @@ class SpinPulseBackend(Backend):
             self._ideal_reservoir = (tl, matrix)
         return matrix
 
+    # def _apply_encoding(self, state, step_values, tl: _Timeline, env, t_start: int):
+    #     """
+    #     Apply the (noisy) encoding pulses of one timestep to every window.
+    #         state : current batch of quantum states, shape : (2^n, S)
+    #         step_values : input values for the current timestep, one value per input qubit
+    #         tl : timeline which specifies reservoir structure
+    #         env : noise env
+    #         t_start : start index of the current timestep's ecnoding block in the noise traces
+    #     """
+    #     samples = state.shape[1]
+    #     for q in range(tl.n_qubits):
+    #         noise = _trace_slice(env, tl.physical[q], t_start, tl.enc_duration)
+    #         if q < tl.n_inputs: # idenitfy input qubits -> input-dependent rotation
+    #             unitaries = _propagate_rotations(   # encoing operation
+    #                 tl.gates[q], tl.slots, step_values, noise, tl.enc_duration,
+    #                 only_idle=env is not None and env.only_idle,
+    #             )
+    #         else:   # memory qubits _. idle unitary evolution
+    #             unitaries = np.broadcast_to(
+    #                 _idle_unitary(noise, tl.enc_duration, tl.specs), (samples, 2, 2)
+    #             )
+    #         state = _apply_single_qubit(state, unitaries, q, tl.n_qubits)
+    #     return state
+
+    def _exact_reset(self, n_qubits: int) -> bool:
+        """Whether the input reset is done exactly, with density matrices (see ``reset_method``)."""
+        method = self.config.reset_method
+        return method == "exact" or (method == "auto" and n_qubits <= EXACT_RESET_MAX_QUBITS)
+
     def _apply_encoding(self, state, step_values, tl: _Timeline, env, t_start: int):
         """
         Apply the (noisy) encoding pulses of one timestep to every window.
@@ -379,22 +548,51 @@ class SpinPulseBackend(Backend):
             step_values : input values for the current timestep, one value per input qubit
             tl : timeline which specifies reservoir structure
             env : noise env
-            t_start : start index of the current timestep's ecnoding block in the noise traces
+            t_start : start index of the current timestep's encoding block in the noise traces
         """
-        samples = state.shape[1]
+        for q, unitaries in self._encoding_unitaries(step_values, tl, env, t_start, state.shape[1]):
+            state = _apply_single_qubit(state, unitaries, q, tl.n_qubits)
+        return state
+
+    def _encoding_unitaries(self, step_values, tl: _Timeline, env, t_start: int, samples: int):
+        """Per qubit ``(q, unitaries of shape (samples, 2, 2))`` of one timestep's encoding block."""
         for q in range(tl.n_qubits):
             noise = _trace_slice(env, tl.physical[q], t_start, tl.enc_duration)
-            if q < tl.n_inputs: # idenitfy input qubits -> input-dependent rotation
-                unitaries = _propagate_rotations(   # encoing operation
+            if q < tl.n_inputs:  # input qubits: data-dependent rotation
+                unitaries = _propagate_rotations(
                     tl.gates[q], tl.slots, step_values, noise, tl.enc_duration,
                     only_idle=env is not None and env.only_idle,
                 )
-            else:   # memory qubits _. idle unitary evolution
+            else:  # memory qubits: idle evolution
                 unitaries = np.broadcast_to(
                     _idle_unitary(noise, tl.enc_duration, tl.specs), (samples, 2, 2)
                 )
-            state = _apply_single_qubit(state, unitaries, q, tl.n_qubits)
-        return state
+            yield q, unitaries
+
+
+def _apply_single_qubit_dm(rho, unitaries, qubit: int, n_qubits: int):
+    """U rho U^dagger with a per-window 2x2 unitary on ``qubit``; rho has shape (samples, 2^n, 2^n)."""
+    samples, dim, _ = rho.shape
+
+    def left(m):  # U m, acting on the row index of every window's matrix
+        view = m.reshape(samples, 2 ** (n_qubits - 1 - qubit), 2, 2**qubit, dim)
+        return np.einsum("sab,sibjk->siajk", unitaries, view).reshape(m.shape)
+
+    rho = left(rho)  # U rho
+    return left(rho.conj().transpose(0, 2, 1)).conj().transpose(0, 2, 1)  # (U (U rho)^dag)^dag = U rho U^dag
+
+
+def _reset_inputs_exact(rho, n_inputs: int):
+    """Reset the input qubits (the lowest bits) to |0>: rho -> Tr_inputs(rho) (x) |0><0|."""
+    samples, dim, _ = rho.shape
+    d_in = 2**n_inputs
+    blocks = rho.reshape(samples, dim // d_in, d_in, dim // d_in, d_in)
+    out = np.zeros_like(rho)
+    out.reshape(samples, dim // d_in, d_in, dim // d_in, d_in)[:, :, 0, :, 0] = np.einsum(
+        "saibi->sab", blocks
+    )
+    return out
+
 
 def _circuit_unitary(circuit: QuantumCircuit) -> np.ndarray:
     """
