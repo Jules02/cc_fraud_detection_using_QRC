@@ -49,12 +49,16 @@ jobs:
       - name: Check the data against the local copy
         run: |
           python - <<'EOF'
+          import hashlib
           import pandas as pd
-          expected = {"train": (483807, 3713328602804248856), "validation": (102003, 1867724022990818794),
-                      "test": (106153, 2006970490275312815)}
+          # sha256 of the CSV text of the columns used (pandas' own hash changes between versions)
+          expected = {"train": (483807, "0b3c2f2bb2833c8f"), "validation": (102003, "be4bd22b70a35d0a"),
+                      "test": (106153, "72a367848b712704")}
           for split, (n, fingerprint) in expected.items():
               df = pd.read_pickle(f"data/sc3_c1000_x6/transactions_{split}.pkl").reset_index(drop=True)
-              got = (len(df), int(pd.util.hash_pandas_object(df, index=False).sum() % 2**63))
+              df = df[["TX_DATETIME", "CUSTOMER_ID", "TERMINAL_ID", "TX_AMOUNT", "TX_FRAUD", "TX_FRAUD_SCENARIO"]].astype(
+                  {"CUSTOMER_ID": "int64", "TERMINAL_ID": "int64", "TX_AMOUNT": "float64"})
+              got = (len(df), hashlib.sha256(df.to_csv(index=False, float_format="%.6f").encode()).hexdigest()[:16])
               assert got == (n, fingerprint), f"{split}: {got} != {(n, fingerprint)}"
               print(split, "ok")
           EOF
