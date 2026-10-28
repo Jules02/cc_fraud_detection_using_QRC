@@ -9,7 +9,7 @@ name: fraud_2
 on:
   push:
     branches: [fraud-2]
-    paths: [.github/workflows/fraud_2.yml, results/2_fraud/fraud.py, results/2_fraud/jobs.txt]
+    paths: [.github/workflows/fraud_2.yml, results/2_fraud/fraud.py, results/2_fraud/jobs.txt, qrc/readout.py]
   workflow_dispatch:
 
 env:
