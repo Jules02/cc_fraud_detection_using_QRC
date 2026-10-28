@@ -315,7 +315,8 @@ def build_parser():
         type=int,
         default=1,
         help="trials run in parallel threads, sharing the prepared data. Speeds up the "
-        "numpy backend (it releases the GIL); the Aer backends gain nothing",
+        "numpy backend and gaussian with --simulator numpy (numpy releases the GIL); the Aer "
+        "backends gain nothing",
     )
     return parser
 

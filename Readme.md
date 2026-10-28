@@ -187,6 +187,7 @@ state after its last transaction is the readout input:
 | -------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------- |
 | `--backend`          | `estimator-exact`  | `estimator-exact`, `gaussian`, `shots`, `numpy` or `spinpulse` (see below)                                                |
 | `--precision`        | `0.05`             | Target standard error per expectation value (`gaussian` / `shots` / `spinpulse`; `0` is exact, `spinpulse` only)          |
+| `--simulator`        | `aer`              | What computes the exact values `gaussian` adds noise to: `aer` or `numpy` (same features, much faster)                    |
 | `--n-input-qubits`   | number of features | Input qubits. With fewer qubits than features, dense angle encoding is used (see below)                                   |
 | `--n-mem-qubits`     | `2`                | Memory qubits                                                                                                             |
 | `--hamiltonian`      | `random`           | `random`, `tfim`, `tfim-longitudinal`, `tfim-native` or `native-exchange`                                                 |
@@ -206,6 +207,8 @@ The backends:
 
 - `estimator-exact` (default): exact, noiseless simulation with the Qiskit Aer Estimator. Windows are sent to Aer in batches.
 - `gaussian`: exact expectation values plus Gaussian noise of width `--precision`. This is a cheap stand-in for shot noise.
+  With `--simulator numpy` the exact values come from the `numpy` backend instead of Aer. The noise is drawn the same
+  way, so the features are the same up to machine precision, 4–6× faster on 4–5 qubits.
 - `shots`: real shot sampling with about `1/precision²` shots.
 - `numpy`: exact, noiseless batched simulation in plain NumPy. Same results as `estimator-exact`, but much faster
   for small registers (up to ~8 qubits).
@@ -339,8 +342,8 @@ Tuner options: `--n-trials`, `--timeout`, `--study-name`, `--output-dir` (defaul
 whole study (data, feature set, window length, backend, ...).
 
 `--n-jobs N` runs N trials at once, in threads that share the prepared data (so memory grows little).
-It speeds up the `numpy` backend (about 3.6× with 6 threads on a 6-core laptop); the Aer backends
-(`estimator-exact`, `gaussian`, `shots`) gain nothing from it. Use at most one thread per physical core. Passing an option the search sets
+It speeds up the `numpy` backend and `gaussian` with `--simulator numpy` (about 3.6× with 6 threads on a
+6-core laptop); the Aer backends (`estimator-exact`, `gaussian`, `shots`) gain nothing from it. Use at most one thread per physical core. Passing an option the search sets
 (e.g. `--n-mem-qubits`) is an error.
 
 A study is saved in `results/tune/<study-name>/`:
